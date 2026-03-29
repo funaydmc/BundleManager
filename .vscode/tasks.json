@@ -1,0 +1,26 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "gradle",
+			"id": "d:\\Repositories\\BundleManagerbuildBundleManager",
+			"script": "build",
+			"description": "Assembles and tests this project.",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"project": "BundleManager",
+			"buildFile": "D:\\Repositories\\BundleManager\\build.gradle",
+			"rootProject": "BundleManager",
+			"projectFolder": "d:\\Repositories\\BundleManager",
+			"workspaceFolder": "d:\\Repositories\\BundleManager",
+			"args": "",
+			"javaDebug": false,
+			"problemMatcher": [
+				"$gradle"
+			],
+			"label": "gradle: build"
+		}
+	]
+}

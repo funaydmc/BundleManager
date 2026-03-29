@@ -1,0 +1,65 @@
+package tk.funayd.bundleManager.bundle;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+public final class BundlePreference {
+
+    private final String bundleId;
+    private final String sourceZipName;
+    private final boolean bundleDisabled;
+    private final List<String> disabledPackages;
+    private final String selectedBundleVariant;
+    private final Map<String, String> selectedPackages;
+
+    public BundlePreference(
+            String bundleId,
+            String sourceZipName,
+            boolean bundleDisabled,
+            List<String> disabledPackages,
+            Map<String, String> selectedPackages
+    ) {
+        this(bundleId, sourceZipName, bundleDisabled, disabledPackages, null, selectedPackages);
+    }
+
+    public BundlePreference(
+            String bundleId,
+            String sourceZipName,
+            boolean bundleDisabled,
+            List<String> disabledPackages,
+            String selectedBundleVariant,
+            Map<String, String> selectedPackages
+    ) {
+        this.bundleId = bundleId;
+        this.sourceZipName = sourceZipName;
+        this.bundleDisabled = bundleDisabled;
+        this.disabledPackages = List.copyOf(disabledPackages);
+        this.selectedBundleVariant = selectedBundleVariant;
+        this.selectedPackages = Map.copyOf(new LinkedHashMap<>(selectedPackages));
+    }
+
+    public String getBundleId() {
+        return bundleId;
+    }
+
+    public String getSourceZipName() {
+        return sourceZipName;
+    }
+
+    public boolean isBundleDisabled() {
+        return bundleDisabled;
+    }
+
+    public List<String> getDisabledPackages() {
+        return disabledPackages;
+    }
+
+    public String getSelectedBundleVariant() {
+        return selectedBundleVariant;
+    }
+
+    public Map<String, String> getSelectedPackages() {
+        return selectedPackages;
+    }
+}

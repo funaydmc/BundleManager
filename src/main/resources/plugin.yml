@@ -1,0 +1,14 @@
+name: BundleManager
+version: '${version}'
+main: tk.funayd.bundleManager.BundleManager
+api-version: '1.18'
+commands:
+  bundle:
+    description: Enable, disable, and list managed bundles
+    usage: /bundle <enable|disable|variant|chose|reload|list|supported>
+    aliases: [bm]
+    permission: bundlemanager.admin
+permissions:
+  bundlemanager.admin:
+    description: Full access to BundleManager commands
+    default: op
