@@ -1,3 +1,14 @@
+import proguard.gradle.ProGuardTask
+
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.guardsquare:proguard-gradle:7.9.0'
+    }
+}
+
 plugins {
     id 'java'
     id("xyz.jpenilla.run-paper") version "2.3.1"
@@ -64,4 +75,44 @@ processResources {
     filesMatching('plugin.yml') {
         expand props
     }
+}
+
+def obfuscatedJarFile = layout.buildDirectory.file("libs/${project.name}-${project.version}-obfuscated.jar")
+def proguardMappingFile = layout.buildDirectory.file("reports/proguard/mapping.txt")
+def proguardSeedsFile = layout.buildDirectory.file("reports/proguard/seeds.txt")
+def proguardUsageFile = layout.buildDirectory.file("reports/proguard/usage.txt")
+
+tasks.register('obfuscateJar', ProGuardTask) {
+    group = 'build'
+    description = 'Builds an obfuscated plugin jar for distribution.'
+    dependsOn tasks.named('jar')
+
+    configuration file('proguard.pro')
+
+    injars(tasks.named('jar', Jar).flatMap { it.archiveFile })
+    outjars(obfuscatedJarFile)
+
+    if (JavaVersion.current().isJava9Compatible()) {
+        fileTree("${System.getProperty('java.home')}/jmods").matching {
+            include '*.jmod'
+        }.files.each { File jmodFile ->
+            libraryjars(
+                    jmodFile.absolutePath,
+                    jarfilter: '!**.jar',
+                    filter: '!module-info.class'
+            )
+        }
+    } else {
+        libraryjars "${System.getProperty('java.home')}/lib/rt.jar"
+    }
+
+    libraryjars(sourceSets.main.compileClasspath)
+
+    printmapping(proguardMappingFile.get().asFile)
+    printseeds(proguardSeedsFile.get().asFile)
+    printusage(proguardUsageFile.get().asFile)
+}
+
+tasks.named('assemble') {
+    dependsOn tasks.named('obfuscateJar')
 }
