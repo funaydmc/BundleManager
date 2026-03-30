@@ -53,6 +53,7 @@ public final class BundleService {
     private final File conflictDirectory;
     private final File backupDirectory;
     private final File bundleIndexFile;
+    private final File archiveCompatibilityFile;
     private final Path serverRoot;
     private final Map<String, Map<String, String>> failedPackageMessages;
     private List<VariantPromptOption> pendingVariantOptions;
@@ -80,8 +81,15 @@ public final class BundleService {
         this.conflictDirectory = new File(dataDirectory, "conflicts");
         this.backupDirectory = new File(dataDirectory, "backups");
         this.bundleIndexFile = new File(dataDirectory, "bundle-index.yml");
+        this.archiveCompatibilityFile = new File(dataDirectory, "archive-compatibility.yml");
         this.archiveInspector = new BundleArchiveInspector(installerRegistry);
-        this.stateStore = new BundleStateStore(packageDirectory, preferenceDirectory, conflictDirectory, bundleIndexFile);
+        this.stateStore = new BundleStateStore(
+                packageDirectory,
+                preferenceDirectory,
+                conflictDirectory,
+                bundleIndexFile,
+                archiveCompatibilityFile
+        );
         this.failedPackageMessages = new LinkedHashMap<>();
         this.pendingVariantOptions = List.of();
         this.pendingVariantMessages = List.of();
@@ -2920,7 +2928,14 @@ public final class BundleService {
             }
             String lowerName = archiveFile.getName().toLowerCase(Locale.ROOT);
             if (lowerName.endsWith(".zip")) {
-                return new ZipBundleArchive(archiveFile);
+                boolean preferStreaming = stateStore.shouldPreferStreamingZip(archiveFile);
+                ZipBundleArchive archive = new ZipBundleArchive(archiveFile, preferStreaming);
+                if (archive.isStreamBacked()) {
+                    stateStore.rememberStreamingZip(archiveFile);
+                } else {
+                    stateStore.clearArchiveOpenPreference(archiveFile);
+                }
+                return archive;
             }
         } catch (IOException ex) {
             throw new BundleException("Failed to open bundle archive: " + archiveFile.getName(), ex);
