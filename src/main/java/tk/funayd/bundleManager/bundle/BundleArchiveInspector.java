@@ -85,7 +85,7 @@ final class BundleArchiveInspector {
             List<DiscoveredPackageRoot> discoveredRoots,
             Map<String, String> installedPluginNames
     ) throws BundleException {
-        // Gap root resource pack truoc de khong dao sau vao pack con.
+        // Detect the resource-pack root first so nested packs are not scanned as child packages.
         if (containsPackMcmeta(current)) {
             discoveredRoots.add(new DiscoveredPackageRoot(
                     "ResourcePack",

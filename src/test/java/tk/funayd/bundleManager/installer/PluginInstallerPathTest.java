@@ -33,6 +33,19 @@ class PluginInstallerPathTest {
     }
 
     @Test
+    void itemsAdderShouldTreatUnknownTopLevelFoldersAsImplicitContentRoots() throws Exception {
+        ItemsAdderInstaller installer = new ItemsAdderInstaller();
+
+        ResolvedBundleFile resolved = installer.resolveFile("mystery_pack/configs/example.yml", "abc").orElseThrow();
+        List<BundleRecord.ConfigMutation> mutations = installer.buildConfigMutations(List.of(resolved), "abc");
+
+        assertEquals("plugins/ItemsAdder/contents/mystery_pack/configs/example.yml", resolved.getTargetRelativePath());
+        assertEquals(1, mutations.size());
+        assertEquals("mystery_pack", mutations.get(0).getValue());
+        assertTrue(installer.resolveFile("pack.mcmeta", "abc").isEmpty());
+    }
+
+    @Test
     void mythicMobsShouldKeepIdsButHandleRealFolderLayouts() throws Exception {
         MythicMobsInstaller installer = new MythicMobsInstaller();
 
@@ -111,7 +124,7 @@ class PluginInstallerPathTest {
     }
 
     @Test
-    void nexoInstallerShouldOnlyAcceptDocumentedContentDirectories() throws Exception {
+    void nexoInstallerShouldAcceptDocumentedAndImplicitContentDirectories() throws Exception {
         NexoInstaller installer = new NexoInstaller();
 
         assertEquals(
@@ -126,7 +139,10 @@ class PluginInstallerPathTest {
                 "plugins/Nexo/pack/external_packs/MyPack/assets/example.json",
                 installer.resolveFile("pack/external_packs/MyPack/assets/example.json", "abc").orElseThrow().getTargetRelativePath()
         );
+        assertEquals(
+                "plugins/Nexo/mystery_pack/items/weapons.yml",
+                installer.resolveFile("mystery_pack/items/weapons.yml", "abc").orElseThrow().getTargetRelativePath()
+        );
         assertTrue(installer.resolveFile("config.yml", "abc").isEmpty());
-        assertTrue(installer.resolveFile("mechanics/furniture.yml", "abc").isEmpty());
     }
 }

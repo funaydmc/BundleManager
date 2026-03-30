@@ -30,6 +30,12 @@ public final class BundleManager extends JavaPlugin {
         if (bundleService.hasIgnoredIncomingFiles()) {
             getLogger().warning("Ignored non-zip files in bundles folder. Only .zip bundles are loaded.");
         }
+        if (report.hasMissingPlugins()) {
+            getLogger().warning(report.getMissingPluginHeader());
+            for (String line : report.getMissingPluginLines()) {
+                getLogger().warning(line);
+            }
+        }
         for (String warning : report.getWarnings()) {
             getLogger().warning(warning);
         }

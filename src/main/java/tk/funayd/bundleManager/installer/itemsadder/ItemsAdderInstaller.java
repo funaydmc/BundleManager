@@ -28,12 +28,12 @@ public final class ItemsAdderInstaller extends AbstractPluginInstaller {
         }
 
         List<String> segments = pathSegments(relativePath);
-        // Chi nhan bundle nam duoi contents/<bundle_name>/...
-        if (segments.size() < 3 || !"contents".equals(segments.get(0))) {
+        String normalizedPath = normalizeContentPath(relativePath, segments);
+        if (normalizedPath == null) {
             return Optional.empty();
         }
 
-        return Optional.of(new ResolvedBundleFile(relativePath, pluginPath(relativePath)));
+        return Optional.of(new ResolvedBundleFile(relativePath, pluginPath(normalizedPath)));
     }
 
     @Override
@@ -47,12 +47,13 @@ public final class ItemsAdderInstaller extends AbstractPluginInstaller {
                 continue;
             }
 
-            if (segments.size() >= 3 && "contents".equals(segments.get(0))) {
-                contentFolders.add(segments.get(1));
+            String contentFolder = extractContentFolder(segments);
+            if (contentFolder != null) {
+                contentFolders.add(contentFolder);
             }
         }
 
-        // Ho tro ca key config moi va key cu cua ItemsAdder.
+        // Support both the new and legacy ItemsAdder config keys.
         ArrayList<BundleRecord.ConfigMutation> mutations = new ArrayList<>(contentFolders.size());
         for (String contentFolder : contentFolders) {
             mutations.add(appendStringListMutation(
@@ -98,8 +99,9 @@ public final class ItemsAdderInstaller extends AbstractPluginInstaller {
         LinkedHashSet<String> contentFolders = new LinkedHashSet<>();
         for (ResolvedBundleFile installedFile : installedFiles) {
             List<String> segments = pathSegments(installedFile.getSourceRelativePath());
-            if (segments.size() >= 3 && "contents".equals(segments.get(0))) {
-                contentFolders.add(segments.get(1));
+            String contentFolder = extractContentFolder(segments);
+            if (contentFolder != null) {
+                contentFolders.add(contentFolder);
             }
         }
 
@@ -112,5 +114,25 @@ public final class ItemsAdderInstaller extends AbstractPluginInstaller {
             ));
         }
         return identities;
+    }
+
+    private String normalizeContentPath(String relativePath, List<String> segments) {
+        if (segments.size() >= 3 && "contents".equals(segments.get(0))) {
+            return relativePath;
+        }
+        if (segments.size() >= 2) {
+            return "contents/" + relativePath;
+        }
+        return null;
+    }
+
+    private String extractContentFolder(List<String> segments) {
+        if (segments.size() >= 3 && "contents".equals(segments.get(0))) {
+            return segments.get(1);
+        }
+        if (segments.size() >= 2) {
+            return segments.get(0);
+        }
+        return null;
     }
 }

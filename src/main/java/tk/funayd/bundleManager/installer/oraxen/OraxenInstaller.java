@@ -27,7 +27,7 @@ public final class OraxenInstaller extends AbstractDirectoryInstaller {
         }
 
         String rootDirectory = sourceSegments.get(0).toLowerCase(Locale.ROOT);
-        // Chi nhan cac thu muc content chinh theo docs, bo qua settings/mechanics o root.
+        // Only accept the documented content directories and ignore root settings/mechanics files.
         return "items".equals(rootDirectory)
                 || "pack".equals(rootDirectory)
                 || "recipes".equals(rootDirectory)

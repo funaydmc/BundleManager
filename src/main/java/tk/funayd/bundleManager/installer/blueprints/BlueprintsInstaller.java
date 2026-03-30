@@ -20,7 +20,7 @@ public final class BlueprintsInstaller extends AbstractDirectoryInstaller {
 
     @Override
     protected boolean shouldInstallPath(List<String> sourceSegments) {
-        // Blueprints bundle thato thuc te chi can giu nguyen cay thu muc model.
+        // Real Blueprints bundles only need the model directory tree copied as-is.
         return sourceSegments.size() >= 2;
     }
 

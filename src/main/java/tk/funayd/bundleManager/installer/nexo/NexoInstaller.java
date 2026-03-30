@@ -27,11 +27,12 @@ public final class NexoInstaller extends AbstractDirectoryInstaller {
         }
 
         String rootDirectory = sourceSegments.get(0).toLowerCase(Locale.ROOT);
-        // Nexo docs tap trung vao items, glyphs, dialogs va pack.
+        // Keep documented roots, but also allow unknown top-level folders as content roots.
         return "items".equals(rootDirectory)
                 || "glyphs".equals(rootDirectory)
                 || "dialogs".equals(rootDirectory)
-                || "pack".equals(rootDirectory);
+                || "pack".equals(rootDirectory)
+                || sourceSegments.size() >= 2;
     }
 
     @Override

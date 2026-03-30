@@ -121,6 +121,30 @@ class BundleServiceTest {
     }
 
     @Test
+    void shouldInstallImplicitItemsAdderContentFoldersUnderContents() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path itemsAdderConfig = serverRoot.resolve("plugins/ItemsAdder/config.yml");
+        Files.createDirectories(itemsAdderConfig.getParent());
+        Files.writeString(itemsAdderConfig, "contents-folders-priorities: []\n");
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/itemsadder-implicit.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "ItemsAdder/mystery_pack/configs/example.yml", "enabled: true\n"
+        ));
+
+        var results = service.installBundle("itemsadder-implicit", "ItemsAdder");
+
+        assertEquals(1, results.size());
+        assertTrue(Files.exists(serverRoot.resolve("plugins/ItemsAdder/contents/mystery_pack/configs/example.yml")));
+        YamlConfiguration itemsAdderYaml = YamlConfiguration.loadConfiguration(itemsAdderConfig.toFile());
+        assertTrue(itemsAdderYaml.getStringList("contents-folders-priorities").contains("mystery_pack"));
+    }
+
+    @Test
     void shouldRefuseToOverwriteExistingTargetFileDuringInstall() throws Exception {
         Path serverRoot = tempDir.resolve("server");
         JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
@@ -423,6 +447,24 @@ class BundleServiceTest {
     }
 
     @Test
+    void shouldInstallImplicitNexoContentFolders() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/nexo-implicit.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "Nexo/mystery_pack/items/weapons.yml", "onyx_sword:\n  material: DIAMOND_SWORD\n"
+        ));
+
+        var results = service.installBundle("nexo-implicit", "Nexo");
+
+        assertEquals(1, results.size());
+        assertTrue(Files.exists(serverRoot.resolve("plugins/Nexo/mystery_pack/items/weapons.yml")));
+    }
+
+    @Test
     void shouldInstallPackagesFromNestedZipInsideBundleZip() throws Exception {
         Path serverRoot = tempDir.resolve("server");
         JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
@@ -505,6 +547,29 @@ class BundleServiceTest {
     }
 
     @Test
+    void shouldReportAlreadyActivePackagesOnUnchangedReload() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/stable-bundle.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "MythicMobs/Mobs/Zombie.yml", "zombie:\n  Type: ZOMBIE\n"
+        ));
+
+        BundleLoadReport firstLoad = service.autoLoadBundles();
+        assertEquals(1, firstLoad.getInstalledPackageCount());
+        assertEquals(1, firstLoad.getInstalledBundleCount());
+
+        BundleLoadReport secondLoad = service.autoLoadBundles();
+        assertEquals(1, secondLoad.getInstalledPackageCount());
+        assertEquals(1, secondLoad.getInstalledBundleCount());
+        assertTrue(secondLoad.getWarnings().isEmpty());
+        assertTrue(secondLoad.getErrors().isEmpty());
+    }
+
+    @Test
     void shouldIncludeBundleAndPackageContextInAutoLoadWarningsForMultiPackageBundles() throws Exception {
         Path serverRoot = tempDir.resolve("server");
         JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
@@ -552,11 +617,10 @@ class BundleServiceTest {
         BundleLoadReport report = service.autoLoadBundles();
 
         assertEquals(0, report.getInstalledPackageCount());
-        assertTrue(report.getWarnings().stream().anyMatch(message ->
-                message.contains("[itemsadder-missing.zip]")
-                        && message.contains("Plugin 'ItemsAdder' is not installed")
-                        && message.contains("https://itemsadder.devs.beer/first-install")
-        ));
+        assertTrue(report.getWarnings().isEmpty());
+        assertTrue(report.hasMissingPlugins());
+        assertEquals("ItemsAdder", report.getMissingPlugins().get(0).pluginName());
+        assertEquals(List.of("1"), report.getMissingPlugins().get(0).bundleIds());
     }
 
     @Test
@@ -686,6 +750,33 @@ class BundleServiceTest {
         assertTrue(switchReport.getSucceededPackages().contains("MythicMobs@vanilla"));
         assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/VanillaMob.yml")));
         assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/ModelMob.yml")));
+    }
+
+    @Test
+    void shouldDisableVariantPackageByBasePluginName() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleRoot = serverRoot.resolve("plugins/BundleManager/bundles/ORAXEN_VARIANTS");
+        Files.createDirectories(bundleRoot.resolve("vanilla/Oraxen/items"));
+        Files.createDirectories(bundleRoot.resolve("modded/Oraxen/items"));
+        Files.writeString(bundleRoot.resolve("vanilla/Oraxen/items/vanilla.yml"), "vanilla_sword:\n  material: DIAMOND_SWORD\n");
+        Files.writeString(bundleRoot.resolve("modded/Oraxen/items/modded.yml"), "modded_sword:\n  material: NETHERITE_SWORD\n");
+
+        service.autoLoadBundles();
+
+        String bundleId = service.listInstalledBundles().get(0).getBundleShortId();
+        assertEquals(List.of("Oraxen"), service.listKnownPackageKeys(bundleId));
+
+        BundleActionReport disableReport = service.disableBundleById(bundleId, "Oraxen");
+        assertEquals(List.of("Oraxen"), disableReport.getDisabledPackages());
+        assertTrue(service.listInstalledPackageKeys(bundleId).isEmpty());
+
+        service.autoLoadBundles();
+
+        assertTrue(service.listInstalledPackageKeys(bundleId).isEmpty());
     }
 
     @Test

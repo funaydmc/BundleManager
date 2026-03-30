@@ -29,7 +29,7 @@ class BundleCommandTest {
     void shouldTabCompleteEnableDisableArguments() {
         BundleService bundleService = mock(BundleService.class);
         when(bundleService.listKnownBundleIds()).thenReturn(List.of("347272", "12ab34"));
-        when(bundleService.listKnownPackageKeys("347272")).thenReturn(List.of("ItemsAdder", "MMOItems", "MythicMobs@vanilla"));
+        when(bundleService.listKnownPackageKeys("347272")).thenReturn(List.of("ItemsAdder", "MMOItems", "MythicMobs"));
         when(bundleService.listPendingVariantIndexes()).thenReturn(List.of("1", "2"));
         when(bundleService.listOverwriteConflictIds()).thenReturn(List.of("1", "2"));
 
@@ -50,7 +50,7 @@ class BundleCommandTest {
         assertEquals(List.of("resolve", "reload"), reloadCommands);
         assertEquals(List.of("347272"), bundleIds);
         assertEquals(List.of("MMOItems"), packages);
-        assertEquals(List.of("MythicMobs@vanilla"), variantPackages);
+        assertEquals(List.of("MythicMobs"), variantPackages);
         assertEquals(List.of("347272"), variantBundleIds);
         assertEquals(List.of("2"), variantIndexes);
         assertEquals(List.of("1"), resolveConflictIds);
@@ -118,6 +118,7 @@ class BundleCommandTest {
         when(bundleService.autoLoadBundles()).thenReturn(new BundleLoadReport(
                 4,
                 2,
+                List.of(new tk.funayd.bundleManager.bundle.MissingPluginRequirement("ItemsAdder", List.of("2", "4"))),
                 List.of("warning one"),
                 List.of("error one")
         ));
@@ -135,6 +136,8 @@ class BundleCommandTest {
                         && message.contains("package from")
                         && message.contains("bundle")));
         assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("Ignored non-zip files")));
+        assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("missing plugin")));
+        assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("ItemsAdder")));
         assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("warning one")));
         assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("error one")));
         assertTrue(messageCaptor.getAllValues().stream().noneMatch(message -> message.contains("Multiple variant detected")));

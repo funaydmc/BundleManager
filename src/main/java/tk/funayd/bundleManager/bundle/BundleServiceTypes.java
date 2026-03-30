@@ -12,7 +12,8 @@ record BundleArchiveDescriptor(
         List<String> allPackages,
         List<BundleVariantGroup> variantGroups,
         List<VariantChoiceGroup> variantChoiceGroups,
-        List<String> scanWarnings
+        List<String> scanWarnings,
+        List<String> missingPlugins
 ) {
 }
 

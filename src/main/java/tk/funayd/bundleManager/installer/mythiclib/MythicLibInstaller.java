@@ -21,7 +21,7 @@ public final class MythicLibInstaller extends AbstractDirectoryInstaller {
 
     @Override
     protected boolean shouldInstallPath(List<String> sourceSegments) {
-        // MythicLib thuong load cac file registry trong thu muc con, bo qua root config.
+        // MythicLib usually loads registry files from child directories, so root configs are ignored.
         return sourceSegments.size() >= 2;
     }
 

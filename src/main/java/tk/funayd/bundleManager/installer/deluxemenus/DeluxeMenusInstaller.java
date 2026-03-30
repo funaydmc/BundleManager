@@ -59,7 +59,7 @@ public final class DeluxeMenusInstaller extends AbstractPluginInstaller {
             ResolvedBundleFile bundleFile,
             String bundleIdShort
     ) throws BundleException {
-        // DeluxeMenus dang ky menu qua gui_menus.<id>.file, nen file menu co the doi ten neu bi trung path.
+        // DeluxeMenus registers menus through gui_menus.<id>.file, so menu files can be renamed on path conflicts.
         return Optional.of(renameTargetFileOnConflict(bundleFile, bundleIdShort));
     }
 
@@ -70,7 +70,7 @@ public final class DeluxeMenusInstaller extends AbstractPluginInstaller {
             String menuName;
             String targetFile;
             try {
-                // Menu id duoc dung trong /dm open va openguimenu, nen phai giu nguyen.
+                // Menu ids are used by /dm open and openguimenu, so they must remain unchanged.
                 menuName = PathUtils.baseName(fileName(installedFile.getSourceRelativePath()));
                 targetFile = targetFileValue(installedFile.getTargetRelativePath());
             } catch (BundleException ex) {

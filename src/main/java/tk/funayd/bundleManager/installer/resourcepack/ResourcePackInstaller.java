@@ -22,7 +22,7 @@ public final class ResourcePackInstaller extends AbstractPluginInstaller {
             return Optional.empty();
         }
 
-        // Resource pack duoc copy vao thu muc rieng cua BundleManager.
+        // Resource packs are copied into BundleManager's dedicated pack directory.
         String targetPath = PathUtils.normalizeRelativePath("plugins/BundleManager/pack/" + bundleIdShort + "/" + relativePath);
         return Optional.of(new ResolvedBundleFile(relativePath, targetPath));
     }

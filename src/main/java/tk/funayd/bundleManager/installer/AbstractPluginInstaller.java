@@ -29,7 +29,7 @@ public abstract class AbstractPluginInstaller implements SupportedPluginInstalle
     );
 
     protected final boolean isIgnoredDataFile(String relativePath) {
-        // Bo qua cac file rac ma bundle hay dinh kem theo.
+        // Ignore common junk files that frequently appear inside downloaded bundles.
         return COMMON_IGNORED_FILES.stream().anyMatch(pattern -> pattern.matches(relativePath));
     }
 
@@ -82,7 +82,7 @@ public abstract class AbstractPluginInstaller implements SupportedPluginInstalle
             String targetPath,
             String value
     ) {
-        // Chi append gia tri moi, khong thay the danh sach co san.
+        // Only append new values; never replace an existing list.
         return new BundleRecord.ConfigMutation("APPEND_STRING_LIST", configPath, targetPath, value);
     }
 
@@ -91,7 +91,7 @@ public abstract class AbstractPluginInstaller implements SupportedPluginInstalle
             String targetPath,
             String fileName
     ) {
-        // Chi tao node dang ky moi neu path nay chua co.
+        // Only register a new node when that config path does not already exist.
         return new BundleRecord.ConfigMutation("REGISTER_SECTION_FILE", configPath, targetPath, fileName);
     }
 

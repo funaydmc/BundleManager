@@ -179,6 +179,12 @@ public final class BundleCommand implements TabExecutor {
         if (bundleService.hasIgnoredIncomingFiles()) {
             sender.sendMessage(ChatColor.YELLOW + "Ignored non-zip files in bundles folder. Only .zip bundles are loaded.");
         }
+        if (report.hasMissingPlugins()) {
+            sender.sendMessage(ChatColor.YELLOW + report.getMissingPluginHeader());
+            for (String line : report.getMissingPluginLines()) {
+                sender.sendMessage(ChatColor.YELLOW + line);
+            }
+        }
         for (String warning : report.getWarnings()) {
             sender.sendMessage(ChatColor.YELLOW + warning);
         }

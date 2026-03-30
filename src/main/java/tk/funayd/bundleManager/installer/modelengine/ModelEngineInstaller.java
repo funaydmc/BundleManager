@@ -21,7 +21,7 @@ public final class ModelEngineInstaller extends AbstractDirectoryInstaller {
 
     @Override
     protected boolean shouldInstallPath(List<String> sourceSegments) {
-        // ModelEngine trong bundle thato thuc te nam duoi blueprints/**.
+        // Real-world ModelEngine bundles place content under blueprints/**.
         return sourceSegments.size() >= 2
                 && "blueprints".equals(sourceSegments.get(0).toLowerCase(Locale.ROOT));
     }

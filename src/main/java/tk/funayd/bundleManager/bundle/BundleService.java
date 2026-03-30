@@ -41,18 +41,6 @@ public final class BundleService {
     private static final String APPEND_STRING_LIST = "APPEND_STRING_LIST";
     private static final String REGISTER_SECTION_FILE = "REGISTER_SECTION_FILE";
     private static final String ISSUE_URL = "https://github.com/funaydmc/BundleManager/issues";
-    private static final Map<String, String> OFFICIAL_PLUGIN_URLS = Map.ofEntries(
-            Map.entry("Blueprints", "https://github.com/funaydmc/BundleManager/issues"),
-            Map.entry("DeluxeMenus", "https://wiki.helpch.at/helpchat-plugins/deluxemenus"),
-            Map.entry("ItemsAdder", "https://itemsadder.devs.beer/first-install"),
-            Map.entry("MCPets", "https://mcpets.gitbook.io/mcpets"),
-            Map.entry("MMOItems", "https://git.mythiccraft.io/root/mmoitems/-/wikis/home"),
-            Map.entry("ModelEngine", "https://git.mythiccraft.io/mythiccraft/MythicMobs/-/wikis/Model-Engine"),
-            Map.entry("MythicLib", "https://git.mythiccraft.io/mythiccraft/MythicLib/-/wikis/home"),
-            Map.entry("MythicMobs", "https://git.mythiccraft.io/mythiccraft/MythicMobs/-/wikis/home"),
-            Map.entry("Nexo", "https://docs.nexomc.com/"),
-            Map.entry("Oraxen", "https://docs.oraxen.com/")
-    );
 
     private final JavaPlugin plugin;
     private final InstallerRegistry installerRegistry;
@@ -154,7 +142,7 @@ public final class BundleService {
 
     public List<String> listKnownBundleIds() {
         TreeSet<String> bundleIds = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        for (BundleArchiveDescriptor descriptor : scanIncomingBundleDescriptors()) {
+        for (BundleArchiveDescriptor descriptor : scanIncomingBundleDescriptors(false)) {
             bundleIds.add(shortId(descriptor.bundleId()));
         }
         for (BundleSummary bundle : listInstalledBundles()) {
@@ -169,11 +157,7 @@ public final class BundleService {
     public List<String> listKnownPackageKeys(String bundleIdQuery) {
         try {
             KnownBundle knownBundle = resolveKnownBundle(bundleIdQuery);
-            TreeSet<String> values = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-            values.addAll(knownBundle.allKnownPackages());
-            values.addAll(listInstalledPackageKeys(knownBundle.bundleId()));
-            values.addAll(loadPreference(knownBundle.bundleId(), knownBundle.sourceZipName()).getDisabledPackages());
-            return new ArrayList<>(values);
+            return listCommandPackageKeys(knownBundle);
         } catch (BundleException ex) {
             return List.of();
         }
@@ -234,9 +218,10 @@ public final class BundleService {
         clearPendingVariantPrompt();
         int installedPackageCount = 0;
         int installedBundleCount = 0;
+        ArrayList<MissingPluginRequirement> missingPlugins = new ArrayList<>();
         ArrayList<String> warnings = new ArrayList<>();
         ArrayList<String> errors = new ArrayList<>();
-        List<BundleArchiveDescriptor> descriptors = scanIncomingBundleDescriptors();
+        List<BundleArchiveDescriptor> descriptors = scanIncomingBundleDescriptors(true);
         LinkedHashMap<String, BundleArchiveDescriptor> descriptorById = new LinkedHashMap<>();
         for (BundleArchiveDescriptor descriptor : descriptors) {
             descriptorById.put(descriptor.bundleId().toLowerCase(Locale.ROOT), descriptor);
@@ -259,14 +244,16 @@ public final class BundleService {
         }
 
         for (BundleArchiveDescriptor descriptor : descriptors) {
+            missingPlugins.addAll(buildMissingPluginRequirements(descriptor));
             warnings.addAll(descriptor.scanWarnings());
             try {
                 BundleActionReport report = reconcileBundle(descriptor);
-                if (!report.getSucceededPackages().isEmpty()) {
-                    installedPackageCount += report.getSucceededPackages().size();
+                int activePackageCount = listInstalledPackageKeys(descriptor.bundleId()).size();
+                if (activePackageCount > 0) {
+                    installedPackageCount += activePackageCount;
                     installedBundleCount++;
                 }
-                warnings.addAll(report.getMessages());
+                warnings.addAll(filterNonMissingPluginMessages(report.getMessages()));
             } catch (BundleException ex) {
                 recordBundleFailure(descriptor.bundleId(), "__bundle__", ex.getMessage());
                 errors.add("Failed to auto-load bundle " + descriptor.sourceZipName() + ": " + ex.getMessage());
@@ -275,6 +262,7 @@ public final class BundleService {
         return new BundleLoadReport(
                 installedPackageCount,
                 installedBundleCount,
+                mergeMissingPluginRequirements(missingPlugins),
                 deduplicatePackages(warnings),
                 deduplicatePackages(errors)
         );
@@ -418,9 +406,10 @@ public final class BundleService {
                     preference.getSelectedPackages()
             );
         } else if (preference.isBundleDisabled()) {
+            List<String> requestedPackageKeys = resolvePackageKeys(knownBundle.allKnownPackages(), requestedPackageKey);
             ArrayList<String> disabledPackages = new ArrayList<>();
             for (String installablePackage : knownBundle.installablePackages()) {
-                if (!installablePackage.equalsIgnoreCase(requestedPackageKey)) {
+                if (!containsIgnoreCase(requestedPackageKeys, installablePackage)) {
                     disabledPackages.add(installablePackage);
                 }
             }
@@ -434,9 +423,10 @@ public final class BundleService {
                     preference.getSelectedPackages()
             );
         } else {
+            List<String> requestedPackageKeys = resolvePackageKeys(knownBundle.allKnownPackages(), requestedPackageKey);
             ArrayList<String> disabledPackages = new ArrayList<>();
             for (String disabledPackage : preference.getDisabledPackages()) {
-                if (!disabledPackage.equalsIgnoreCase(requestedPackageKey)) {
+                if (!containsIgnoreCase(requestedPackageKeys, disabledPackage)) {
                     disabledPackages.add(disabledPackage);
                 }
             }
@@ -491,10 +481,12 @@ public final class BundleService {
             );
         }
 
-        String packageKey = resolvePackageKey(knownBundle.allKnownPackages(), requestedPackageKey);
+        List<String> packageKeys = resolvePackageKeys(knownBundle.allKnownPackages(), requestedPackageKey);
         ArrayList<String> disabledPackages = new ArrayList<>(preference.getDisabledPackages());
-        if (!containsIgnoreCase(disabledPackages, packageKey)) {
-            disabledPackages.add(packageKey);
+        for (String packageKey : packageKeys) {
+            if (!containsIgnoreCase(disabledPackages, packageKey)) {
+                disabledPackages.add(packageKey);
+            }
         }
         preference = new BundlePreference(
                 knownBundle.bundleId(),
@@ -507,25 +499,28 @@ public final class BundleService {
         );
         savePreference(preference);
 
-        if (containsIgnoreCase(listInstalledPackageKeys(knownBundle.bundleId()), packageKey)) {
-            uninstallBundle(knownBundle.bundleId(), packageKey);
-            removedPackages.add(packageKey);
+        List<String> installedPackageKeys = listInstalledPackageKeys(knownBundle.bundleId());
+        for (String packageKey : packageKeys) {
+            if (containsIgnoreCase(installedPackageKeys, packageKey)) {
+                uninstallBundle(knownBundle.bundleId(), packageKey);
+                removedPackages.add(packageKey);
+            }
+            clearPackageFailure(knownBundle.bundleId(), packageKey);
         }
-        clearPackageFailure(knownBundle.bundleId(), packageKey);
 
         return new BundleActionReport(
                 knownBundle.bundleId(),
                 knownBundle.sourceZipName(),
                 List.of(),
                 List.of(),
-                List.of(packageKey),
+                toCommandPackageNames(packageKeys),
                 List.of()
         );
     }
 
     public List<BundleStatusView> listBundleStatusViews() {
         LinkedHashMap<String, KnownBundle> bundles = new LinkedHashMap<>();
-        for (BundleArchiveDescriptor descriptor : scanIncomingBundleDescriptors()) {
+        for (BundleArchiveDescriptor descriptor : scanIncomingBundleDescriptors(false)) {
             bundles.put(descriptor.bundleId(), new KnownBundle(
                     descriptor.bundleId(),
                     descriptor.sourceZipName(),
@@ -579,7 +574,7 @@ public final class BundleService {
         String bundleIdShort = shortId(bundleId);
 
         try (BundleArchive archive = openArchive(archiveFile)) {
-            // Ho tro tim package o bat ky do sau nao trong bundle de xu ly variant.
+            // Discover package roots at any depth so nested bundle variants work.
             ArchivePackageInfo packageInfo = archiveInspector.inspectArchivePackages(archive, installedServerPluginNames());
             List<BundlePackageDescriptor> packageDescriptors = packageInfo.packageDescriptors();
             if (packageDescriptors.isEmpty()) {
@@ -594,7 +589,8 @@ public final class BundleService {
                     packageInfo.allPackages(),
                     packageInfo.variantGroups(),
                     packageInfo.variantChoiceGroups(),
-                    List.of()
+                    List.of(),
+                    discoverMissingPluginKeys(packageDescriptors)
             );
             List<String> discoveryWarnings = buildBundleScanWarnings(descriptor, packageDescriptors);
             List<BundlePackageDescriptor> installablePackages = resolveRequestedPackages(packageDescriptors, requestedPackageKey);
@@ -1046,13 +1042,23 @@ public final class BundleService {
             String requestedPackageKey
     ) throws BundleException {
         if (requestedPackageKey != null && !requestedPackageKey.isBlank()) {
+            List<String> matchingPackageKeys = resolvePackageKeys(
+                    packageDescriptors.stream()
+                            .map(BundlePackageDescriptor::packageKey)
+                            .toList(),
+                    requestedPackageKey
+            );
+            ArrayList<BundlePackageDescriptor> selectedDescriptors = new ArrayList<>();
             for (BundlePackageDescriptor packageDescriptor : packageDescriptors) {
-                if (packageDescriptor.supported() && packageDescriptor.packageKey().equalsIgnoreCase(requestedPackageKey)) {
+                if (packageDescriptor.supported() && containsIgnoreCase(matchingPackageKeys, packageDescriptor.packageKey())) {
                     if (!isPluginPackageInstallable(packageDescriptor.packageKey())) {
                         throw new BundleException(buildMissingPluginMessage(packageDescriptor.pluginKey()));
                     }
-                    return List.of(packageDescriptor);
+                    selectedDescriptors.add(packageDescriptor);
                 }
+            }
+            if (!selectedDescriptors.isEmpty()) {
+                return selectedDescriptors;
             }
             throw new BundleException("Bundle does not contain package '" + requestedPackageKey + "'.");
         }
@@ -1077,9 +1083,20 @@ public final class BundleService {
             return new ArrayList<>(records);
         }
 
+        List<String> matchingPackageKeys;
+        try {
+            matchingPackageKeys = resolvePackageKeys(
+                    records.stream()
+                            .map(BundleRecord::getPackageKey)
+                            .toList(),
+                    requestedPackageKey
+            );
+        } catch (BundleException ex) {
+            return List.of();
+        }
         ArrayList<BundleRecord> filtered = new ArrayList<>();
         for (BundleRecord record : records) {
-            if (record.getPackageKey().equalsIgnoreCase(requestedPackageKey)) {
+            if (containsIgnoreCase(matchingPackageKeys, record.getPackageKey())) {
                 filtered.add(record);
             }
         }
@@ -1303,9 +1320,17 @@ public final class BundleService {
             boolean autoSelect
     ) throws BundleException {
         if (requestedPackageKey != null && !requestedPackageKey.isBlank()) {
-            String packageKey = resolvePackageKey(descriptor.installablePackages(), requestedPackageKey);
+            ArrayList<String> messages = new ArrayList<>();
+            List<String> matchingPackageKeys = resolvePackageKeys(descriptor.installablePackages(), requestedPackageKey);
+            String packageKey = selectRequestedPackageKey(
+                    descriptor,
+                    preference,
+                    matchingPackageKeys,
+                    autoSelect,
+                    messages
+            );
             BundlePreference updatedPreference = rememberSelectedVariant(preference, descriptor, packageKey);
-            return new VariantSelectionDecision(updatedPreference, List.of(packageKey), List.of());
+            return new VariantSelectionDecision(updatedPreference, List.of(packageKey), messages);
         }
 
         LinkedHashMap<String, String> selectedPackages = new LinkedHashMap<>(preference.getSelectedPackages());
@@ -1470,7 +1495,7 @@ public final class BundleService {
             return new ArrayList<>(installablePackages);
         }
 
-        return List.of(resolvePackageKey(installablePackages, requestedPackageKey));
+        return resolvePackageKeys(installablePackages, requestedPackageKey);
     }
 
     private BundleActionReport withAdditionalMessages(BundleActionReport report, List<String> messages) {
@@ -1596,13 +1621,6 @@ public final class BundleService {
         for (BundlePackageDescriptor packageDescriptor : packageDescriptors) {
             String pluginKey = packageDescriptor.pluginKey();
             if (packageDescriptor.supported()) {
-                if (!isPluginPackageInstallable(packageDescriptor.packageKey())) {
-                    warnings.add(formatPackageScopedMessage(
-                            descriptor,
-                            packageDescriptor.packageKey(),
-                            buildMissingPluginMessage(pluginKey)
-                    ));
-                }
                 continue;
             }
 
@@ -1619,11 +1637,67 @@ public final class BundleService {
     }
 
     private String buildMissingPluginMessage(String pluginKey) {
-        String officialUrl = OFFICIAL_PLUGIN_URLS.get(pluginKey);
-        if (officialUrl == null || officialUrl.isBlank()) {
-            return "Plugin '" + pluginKey + "' is not installed on the server.";
+        return "Plugin '" + pluginKey + "' is not installed on the server.";
+    }
+
+    private List<String> filterNonMissingPluginMessages(List<String> messages) {
+        ArrayList<String> filtered = new ArrayList<>(messages.size());
+        for (String message : messages) {
+            if (!isMissingPluginMessage(message)) {
+                filtered.add(message);
+            }
         }
-        return "Plugin '" + pluginKey + "' is not installed on the server. Official download: " + officialUrl;
+        return filtered;
+    }
+
+    private boolean isMissingPluginMessage(String message) {
+        return message != null && message.contains("is not installed on the server.");
+    }
+
+    private List<String> discoverMissingPluginKeys(List<BundlePackageDescriptor> packageDescriptors) {
+        TreeSet<String> missingPlugins = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        for (BundlePackageDescriptor packageDescriptor : packageDescriptors) {
+            if (!packageDescriptor.supported()) {
+                continue;
+            }
+            if (isPluginPackageInstallable(packageDescriptor.packageKey())) {
+                continue;
+            }
+            missingPlugins.add(packageDescriptor.pluginKey());
+        }
+        return new ArrayList<>(missingPlugins);
+    }
+
+    private List<MissingPluginRequirement> buildMissingPluginRequirements(BundleArchiveDescriptor descriptor) {
+        ArrayList<MissingPluginRequirement> requirements = new ArrayList<>();
+        for (String pluginName : descriptor.missingPlugins()) {
+            requirements.add(new MissingPluginRequirement(pluginName, List.of(descriptor.bundleId())));
+        }
+        return requirements;
+    }
+
+    private List<MissingPluginRequirement> mergeMissingPluginRequirements(List<MissingPluginRequirement> requirements) {
+        LinkedHashMap<String, String> originalNames = new LinkedHashMap<>();
+        LinkedHashMap<String, TreeSet<String>> bundleIdsByPlugin = new LinkedHashMap<>();
+        for (MissingPluginRequirement requirement : requirements) {
+            String normalizedPluginName = requirement.pluginName().toLowerCase(Locale.ROOT);
+            originalNames.putIfAbsent(normalizedPluginName, requirement.pluginName());
+            TreeSet<String> bundleIds = bundleIdsByPlugin.computeIfAbsent(
+                    normalizedPluginName,
+                    ignored -> new TreeSet<>(String.CASE_INSENSITIVE_ORDER)
+            );
+            bundleIds.addAll(requirement.bundleIds());
+        }
+
+        ArrayList<MissingPluginRequirement> merged = new ArrayList<>(bundleIdsByPlugin.size());
+        for (Map.Entry<String, TreeSet<String>> entry : bundleIdsByPlugin.entrySet()) {
+            merged.add(new MissingPluginRequirement(
+                    originalNames.getOrDefault(entry.getKey(), entry.getKey()),
+                    new ArrayList<>(entry.getValue())
+            ));
+        }
+        merged.sort(Comparator.comparing(MissingPluginRequirement::pluginName, String.CASE_INSENSITIVE_ORDER));
+        return merged;
     }
 
     private boolean isPluginPackageInstallable(String packageKey) {
@@ -1653,13 +1727,32 @@ public final class BundleService {
         return installed;
     }
 
-    private String resolvePackageKey(List<String> packageKeys, String requestedPackageKey) throws BundleException {
+    private List<String> resolvePackageKeys(List<String> packageKeys, String requestedPackageKey) throws BundleException {
+        ArrayList<String> exactMatches = new ArrayList<>();
         for (String packageKey : packageKeys) {
             if (packageKey.equalsIgnoreCase(requestedPackageKey)) {
-                return packageKey;
+                exactMatches.add(packageKey);
             }
         }
+        if (!exactMatches.isEmpty()) {
+            return deduplicatePackages(exactMatches);
+        }
+
+        ArrayList<String> baseMatches = new ArrayList<>();
+        for (String packageKey : packageKeys) {
+            if (basePluginKey(packageKey).equalsIgnoreCase(requestedPackageKey)) {
+                baseMatches.add(packageKey);
+            }
+        }
+        if (!baseMatches.isEmpty()) {
+            return deduplicatePackages(baseMatches);
+        }
+
         throw new BundleException("Package not found in bundle: " + requestedPackageKey);
+    }
+
+    private String resolvePackageKey(List<String> packageKeys, String requestedPackageKey) throws BundleException {
+        return resolvePackageKeys(packageKeys, requestedPackageKey).get(0);
     }
 
     private KnownBundle resolveKnownBundle(String bundleIdQuery) throws BundleException {
@@ -1679,7 +1772,7 @@ public final class BundleService {
     }
 
     private KnownBundle findKnownBundleById(String bundleId) {
-        for (BundleArchiveDescriptor descriptor : scanIncomingBundleDescriptors()) {
+        for (BundleArchiveDescriptor descriptor : scanIncomingBundleDescriptors(false)) {
             if (descriptor.bundleId().equals(bundleId)) {
                 return new KnownBundle(
                         descriptor.bundleId(),
@@ -1826,6 +1919,87 @@ public final class BundleService {
         return new BundleStatusView(knownBundle.bundleId(), knownBundle.sourceZipName(), packageViews, overallState);
     }
 
+    private List<String> listCommandPackageKeys(KnownBundle knownBundle) {
+        TreeSet<String> values = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        for (String packageKey : knownBundle.allKnownPackages()) {
+            values.add(basePluginKey(packageKey));
+        }
+        for (String packageKey : listInstalledPackageKeys(knownBundle.bundleId())) {
+            values.add(basePluginKey(packageKey));
+        }
+        for (String packageKey : loadPreference(knownBundle.bundleId(), knownBundle.sourceZipName()).getDisabledPackages()) {
+            values.add(basePluginKey(packageKey));
+        }
+        if (knownBundle.archiveDescriptor() != null) {
+            for (String packageKey : knownBundle.archiveDescriptor().installablePackages()) {
+                values.add(basePluginKey(packageKey));
+            }
+        }
+        return new ArrayList<>(values);
+    }
+
+    private String selectRequestedPackageKey(
+            BundleArchiveDescriptor descriptor,
+            BundlePreference preference,
+            List<String> matchingPackageKeys,
+            boolean autoSelect,
+            List<String> messages
+    ) throws BundleException {
+        if (matchingPackageKeys.size() <= 1) {
+            return matchingPackageKeys.get(0);
+        }
+
+        BundleVariantGroup variantGroup = findVariantGroup(descriptor, matchingPackageKeys);
+        if (variantGroup == null) {
+            return matchingPackageKeys.get(0);
+        }
+
+        String selectedPackage = preference.getSelectedPackages().get(variantGroup.pluginKey().toLowerCase(Locale.ROOT));
+        if (selectedPackage != null && containsIgnoreCase(matchingPackageKeys, selectedPackage)) {
+            return resolvePackageKey(matchingPackageKeys, selectedPackage);
+        }
+
+        VariantChoiceGroup bundleChoiceGroup = findBundleChoiceGroup(descriptor);
+        VariantChoiceOption selectedBundleOption = bundleChoiceGroup == null
+                ? null
+                : findMatchingBundleChoiceOption(bundleChoiceGroup, preference.getSelectedBundleVariant());
+        if (selectedBundleOption != null) {
+            String bundleSelectedPackage = selectedBundleOption.selections().get(variantGroup.pluginKey().toLowerCase(Locale.ROOT));
+            if (bundleSelectedPackage != null && containsIgnoreCase(matchingPackageKeys, bundleSelectedPackage)) {
+                return resolvePackageKey(matchingPackageKeys, bundleSelectedPackage);
+            }
+        }
+
+        if (!autoSelect) {
+            throw new BundleException("Package requires a selected variant: " + variantGroup.pluginKey());
+        }
+
+        String selectedByDefault = matchingPackageKeys.get(0);
+        BundleVariantOption selectedOption = findVariantOption(variantGroup, selectedByDefault);
+        if (selectedOption != null) {
+            messages.add("Auto-selected variant: " + variantGroup.pluginKey() + " - " + selectedOption.displayName());
+        }
+        return selectedByDefault;
+    }
+
+    private BundleVariantGroup findVariantGroup(BundleArchiveDescriptor descriptor, List<String> matchingPackageKeys) {
+        for (BundleVariantGroup variantGroup : descriptor.variantGroups()) {
+            if (matchingPackageKeys.stream().allMatch(candidate ->
+                    variantGroup.options().stream().anyMatch(option -> option.packageKey().equalsIgnoreCase(candidate)))) {
+                return variantGroup;
+            }
+        }
+        return null;
+    }
+
+    private List<String> toCommandPackageNames(List<String> packageKeys) {
+        TreeSet<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        for (String packageKey : packageKeys) {
+            names.add(basePluginKey(packageKey));
+        }
+        return new ArrayList<>(names);
+    }
+
     private BundlePackageState resolvePackageState(KnownBundle knownBundle, BundlePreference preference, String packageKey) {
         boolean nonSelectedVariant = knownBundle.archiveDescriptor() != null
                 && isNonSelectedVariant(knownBundle.archiveDescriptor(), preference, packageKey);
@@ -1846,7 +2020,7 @@ public final class BundleService {
         return BundlePackageState.FAILED;
     }
 
-    private List<BundleArchiveDescriptor> scanIncomingBundleDescriptors() {
+    private List<BundleArchiveDescriptor> scanIncomingBundleDescriptors(boolean logFailures) {
         File[] files = listIncomingBundleSources();
         if (files == null || files.length == 0) {
             return List.of();
@@ -1866,6 +2040,7 @@ public final class BundleService {
                         packageInfo.allPackages(),
                         packageInfo.variantGroups(),
                         packageInfo.variantChoiceGroups(),
+                        List.of(),
                         List.of()
                 );
                 descriptors.add(new BundleArchiveDescriptor(
@@ -1876,10 +2051,13 @@ public final class BundleService {
                         descriptor.allPackages(),
                         descriptor.variantGroups(),
                         descriptor.variantChoiceGroups(),
-                        buildBundleScanWarnings(descriptor, packageInfo.packageDescriptors())
+                        buildBundleScanWarnings(descriptor, packageInfo.packageDescriptors()),
+                        discoverMissingPluginKeys(packageInfo.packageDescriptors())
                 ));
             } catch (BundleException | IOException ex) {
-                plugin.getLogger().warning("Failed to inspect bundle " + file.getName() + ": " + ex.getMessage());
+                if (logFailures) {
+                    plugin.getLogger().warning("Failed to inspect bundle " + file.getName() + ": " + ex.getMessage());
+                }
             }
         }
         descriptors.sort(Comparator.comparing(BundleArchiveDescriptor::sourceZipName, String.CASE_INSENSITIVE_ORDER));
@@ -2043,7 +2221,7 @@ public final class BundleService {
     ) throws BundleException {
         ArrayList<BundleRecord.ConfigMutation> applied = new ArrayList<>();
         for (BundleRecord.ConfigMutation mutation : mutations) {
-            // Chi luu mutation thuc su vua duoc them de tranh go nham config co san.
+            // Persist only mutations that were actually added to avoid removing pre-existing config.
             ConfigMutationResult result = applyConfigMutation(mutation);
             if (result.applied()) {
                 applied.add(mutation);
@@ -2254,7 +2432,7 @@ public final class BundleService {
             try {
                 Files.deleteIfExists(directoryPath);
             } catch (DirectoryNotEmptyException ignored) {
-                // Thu muc nay da duoc dung boi file khac thi de nguyen.
+                // Leave the directory alone if other files still use it.
             } catch (IOException ex) {
                 plugin.getLogger().warning("Failed to delete directory " + directoryPath + ": " + ex.getMessage());
             }
@@ -2262,7 +2440,7 @@ public final class BundleService {
     }
 
     private void cleanupTransientArtifacts(String recordId) {
-        // Ban ghi duoc luu rieng, backup chi la du lieu tam de rollback/uninstall.
+        // Records are persisted separately; backups are only temporary rollback/uninstall data.
         deleteIfExists(stateStore.getRecordFile(recordId).toPath());
         deleteRecursively(backupDirectory.toPath().resolve(recordId));
     }

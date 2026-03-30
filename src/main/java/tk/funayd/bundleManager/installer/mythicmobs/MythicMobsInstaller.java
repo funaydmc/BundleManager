@@ -93,7 +93,7 @@ public final class MythicMobsInstaller extends AbstractPluginInstaller {
 
         if (segments.size() == 1) {
             String fileName = segments.get(0);
-            // Root config tong cua MythicMobs de nguoi dung tu quan ly, khong copy de tranh ghi de.
+            // Leave the main MythicMobs root config to the server owner and avoid copying it.
             if ("config.yml".equalsIgnoreCase(fileName)) {
                 return Optional.empty();
             }
@@ -110,11 +110,11 @@ public final class MythicMobsInstaller extends AbstractPluginInstaller {
         }
 
         if (!isYamlFileName(segments.get(segments.size() - 1))) {
-            // Asset media can giu nguyen ten file de tranh dut lien ket noi bo.
+            // Keep asset file names unchanged to avoid breaking internal references.
             return Optional.of(new ResolvedBundleFile(relativePath, pluginPath(relativePath)));
         }
 
-        // MythicMobs co truong hop filename dong vai tro id, vi vay mac dinh giu nguyen ten file.
+        // MythicMobs can rely on file names as identifiers, so keep original names by default.
         return Optional.of(new ResolvedBundleFile(relativePath, pluginPath(relativePath)));
     }
 
@@ -205,7 +205,7 @@ public final class MythicMobsInstaller extends AbstractPluginInstaller {
             return "mythic id";
         }
 
-        // Packs co the long Mobs/Skills/Items ben trong, nen phai xac dinh namespace theo toan bo duong dan.
+        // Packs may nest Mobs/Skills/Items, so the namespace must be derived from the full path.
         for (int i = 0; i < segments.size() - 1; i++) {
             String segment = segments.get(i).toLowerCase(Locale.ROOT);
             switch (segment) {

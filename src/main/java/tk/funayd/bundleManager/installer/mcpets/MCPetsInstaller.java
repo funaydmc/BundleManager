@@ -38,7 +38,7 @@ public final class MCPetsInstaller extends AbstractDirectoryInstaller {
             ResolvedBundleFile bundleFile,
             String bundleIdShort
     ) throws BundleException {
-        // MCPets nhan dien pet qua truong Id:, nen file YAML co the doi ten neu can tranh conflict.
+        // MCPets identifies pets through the Id field, so YAML files can be renamed if needed to avoid conflicts.
         return Optional.of(renameTargetFileOnConflict(bundleFile, bundleIdShort));
     }
 
