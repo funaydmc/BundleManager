@@ -256,6 +256,11 @@ public final class BundleService {
                 warnings.addAll(filterNonMissingPluginMessages(report.getMessages()));
             } catch (BundleException ex) {
                 recordBundleFailure(descriptor.bundleId(), "__bundle__", ex.getMessage());
+                int activePackageCount = listInstalledPackageKeys(descriptor.bundleId()).size();
+                if (activePackageCount > 0) {
+                    installedPackageCount += activePackageCount;
+                    installedBundleCount++;
+                }
                 errors.add("Failed to auto-load bundle " + descriptor.sourceZipName() + ": " + ex.getMessage());
             }
         }
@@ -323,9 +328,9 @@ public final class BundleService {
         if (knownBundle.archiveDescriptor() == null) {
             throw new BundleException("Bundle archive is not available for variant switch: " + option.bundleId());
         }
-        BundlePreference preference = loadPreference(knownBundle.bundleId(), knownBundle.sourceZipName());
-        LinkedHashMap<String, String> selectedPackages = new LinkedHashMap<>(preference.getSelectedPackages());
-        String selectedBundleVariant = preference.getSelectedBundleVariant();
+        BundlePreference originalPreference = loadPreference(knownBundle.bundleId(), knownBundle.sourceZipName());
+        LinkedHashMap<String, String> selectedPackages = new LinkedHashMap<>(originalPreference.getSelectedPackages());
+        String selectedBundleVariant = originalPreference.getSelectedBundleVariant();
         if ("Bundle".equalsIgnoreCase(option.title())) {
             selectedBundleVariant = option.displayName();
         } else {
@@ -335,37 +340,50 @@ public final class BundleService {
         }
 
         ArrayList<String> disabledPackages = new ArrayList<>();
-        for (String disabledPackage : preference.getDisabledPackages()) {
+        for (String disabledPackage : originalPreference.getDisabledPackages()) {
             if (option.selections().values().stream().noneMatch(packageKey -> packageKey.equalsIgnoreCase(disabledPackage))) {
                 disabledPackages.add(disabledPackage);
             }
         }
 
-        preference = new BundlePreference(
+        BundlePreference targetPreference = new BundlePreference(
                 knownBundle.bundleId(),
                 knownBundle.sourceZipName(),
-                preference.getSourceSha1(),
+                originalPreference.getSourceSha1(),
                 false,
                 disabledPackages,
                 selectedBundleVariant,
                 selectedPackages
         );
-        savePreference(preference);
 
         VariantSelectionDecision selectionDecision = resolveVariantSelection(
                 knownBundle.archiveDescriptor(),
-                preference,
+                targetPreference,
                 null,
                 true
         );
-        savePreference(selectionDecision.preference());
-        uninstallConflictingVariantPackages(knownBundle.archiveDescriptor(), selectionDecision.targetPackages());
-        BundleActionReport report = installEnabledPackages(
+        BundleStateSnapshot snapshot = captureBundleState(knownBundle.bundleId(), knownBundle.sourceZipName());
+        BundleActionReport report = withBundleStateRollback(snapshot, hasBundleMutationWork(
+                knownBundle.bundleId(),
                 knownBundle.archiveDescriptor(),
-                selectionDecision.targetPackages(),
-                selectionDecision.preference(),
-                false
-        );
+                selectionDecision.targetPackages()
+        ), () -> {
+            uninstallConflictingVariantPackages(knownBundle.archiveDescriptor(), selectionDecision.targetPackages());
+            BundleActionReport installReport = installEnabledPackages(
+                    knownBundle.archiveDescriptor(),
+                    selectionDecision.targetPackages(),
+                    selectionDecision.preference(),
+                    false
+            );
+            ensureRequiredPackagesInstalled(
+                    knownBundle.bundleId(),
+                    selectionDecision.targetPackages(),
+                    installReport,
+                    "Variant switch failed."
+            );
+            savePreference(selectionDecision.preference());
+            return installReport;
+        });
         clearPendingVariantPrompt();
         ArrayList<String> messages = new ArrayList<>(report.getMessages());
         messages.add("Selected variant: " + option.title() + " - " + option.displayName());
@@ -436,14 +454,29 @@ public final class BundleService {
                     preference.getSourceSha1(),
                     false,
                     disabledPackages,
-                    preference.getSelectedBundleVariant(),
-                    preference.getSelectedPackages()
+                preference.getSelectedBundleVariant(),
+                preference.getSelectedPackages()
             );
         }
 
-        savePreference(preference);
-        uninstallConflictingVariantPackages(knownBundle.archiveDescriptor(), targetPackages);
-        BundleActionReport report = installEnabledPackages(knownBundle.archiveDescriptor(), targetPackages, preference, true);
+        BundlePreference finalPreference = preference;
+        BundleStateSnapshot snapshot = captureBundleState(knownBundle.bundleId(), knownBundle.sourceZipName());
+        BundleActionReport report = withBundleStateRollback(snapshot, hasBundleMutationWork(
+                knownBundle.bundleId(),
+                knownBundle.archiveDescriptor(),
+                targetPackages
+        ), () -> {
+            uninstallConflictingVariantPackages(knownBundle.archiveDescriptor(), targetPackages);
+            BundleActionReport installReport = installEnabledPackages(knownBundle.archiveDescriptor(), targetPackages, finalPreference, true);
+            ensureRequiredPackagesInstalled(
+                    knownBundle.bundleId(),
+                    targetPackages,
+                    installReport,
+                    "Enable request failed."
+            );
+            savePreference(finalPreference);
+            return installReport;
+        });
         clearPendingVariantPrompt();
         return withAdditionalMessages(report, selectionDecision.messages());
     }
@@ -463,13 +496,13 @@ public final class BundleService {
                     preference.getSelectedBundleVariant(),
                     preference.getSelectedPackages()
             );
-            savePreference(preference);
             for (BundleRecord record : findBundleRecords(knownBundle.bundleId())) {
                 removedPackages.add(record.getPackageKey());
             }
             if (!removedPackages.isEmpty()) {
                 uninstallBundle(knownBundle.bundleId(), null);
             }
+            savePreference(preference);
             clearBundleFailures(knownBundle.bundleId());
             return new BundleActionReport(
                     knownBundle.bundleId(),
@@ -497,7 +530,6 @@ public final class BundleService {
                 preference.getSelectedBundleVariant(),
                 preference.getSelectedPackages()
         );
-        savePreference(preference);
 
         List<String> installedPackageKeys = listInstalledPackageKeys(knownBundle.bundleId());
         for (String packageKey : packageKeys) {
@@ -507,6 +539,7 @@ public final class BundleService {
             }
             clearPackageFailure(knownBundle.bundleId(), packageKey);
         }
+        savePreference(preference);
 
         return new BundleActionReport(
                 knownBundle.bundleId(),
@@ -603,15 +636,19 @@ public final class BundleService {
             }
 
             ArrayList<BundleInstallResult> results = new ArrayList<>(installablePackages.size());
-            for (BundlePackageDescriptor packageDescriptor : installablePackages) {
-                results.add(installPackage(
-                        archive,
-                        archiveFile.getName(),
-                        bundleId,
-                        bundleIdShort,
-                        packageDescriptor,
-                        approvedOverwriteTargets
-                ));
+            try {
+                for (BundlePackageDescriptor packageDescriptor : installablePackages) {
+                    results.add(installPackage(
+                            archive,
+                            archiveFile.getName(),
+                            bundleId,
+                            bundleIdShort,
+                            packageDescriptor,
+                            approvedOverwriteTargets
+                    ));
+                }
+            } catch (BundleException | RuntimeException ex) {
+                throw rollbackBatchInstallFailure(results, ex);
             }
 
             if (results.isEmpty()) {
@@ -751,17 +788,24 @@ public final class BundleService {
             stateStore.deleteOverwriteConflict(bundleId, packageKey);
             return new BundleInstallResult(record, warnings);
         } catch (IOException ex) {
-            safeRollbackConfigMutations(appliedMutations);
-            rollbackInstall(installedFiles, createdDirectories);
-            cleanupTransientArtifacts(recordId);
-            throw new BundleException("Failed to install package '" + packageKey + "'.", ex);
+            throw rollbackFailedPackageInstall(
+                    packageKey,
+                    recordId,
+                    appliedMutations,
+                    installedFiles,
+                    createdDirectories,
+                    new BundleException("Failed to install package '" + packageKey + "'.", ex)
+            );
         } catch (BundleException | RuntimeException ex) {
-            safeRollbackConfigMutations(appliedMutations);
-            rollbackInstall(installedFiles, createdDirectories);
-            cleanupTransientArtifacts(recordId);
-            throw ex instanceof BundleException ? (BundleException) ex : new BundleException(
-                    "Failed to install package '" + packageKey + "'.",
-                    ex
+            throw rollbackFailedPackageInstall(
+                    packageKey,
+                    recordId,
+                    appliedMutations,
+                    installedFiles,
+                    createdDirectories,
+                    ex instanceof BundleException bundleException
+                            ? bundleException
+                            : new BundleException("Failed to install package '" + packageKey + "'.", ex)
             );
         }
     }
@@ -891,16 +935,10 @@ public final class BundleService {
 
     private void uninstallPackage(BundleRecord record) throws BundleException {
         rollbackConfigMutations(record.getConfigMutations());
-
-        List<BundleRecord.InstalledFile> installedFiles = new ArrayList<>(record.getInstalledFiles());
-        installedFiles.sort(Comparator.comparingInt((BundleRecord.InstalledFile file) -> file.getTargetPath().length()).reversed());
-        for (BundleRecord.InstalledFile installedFile : installedFiles) {
-            deleteIfExists(resolveServerPath(installedFile.getTargetPath()));
-        }
-
+        deleteInstalledFiles(record.getInstalledFiles());
         restoreBackups(record.getInstalledFiles());
         deleteCreatedDirectories(record.getCreatedDirectories());
-        cleanupTransientArtifacts(record.getId());
+        cleanupUninstalledRecord(record.getId());
     }
 
     private void planPluginEntries(
@@ -1160,18 +1198,11 @@ public final class BundleService {
         boolean hashChanged = storedPreference.getSourceSha1() != null
                 && !storedPreference.getSourceSha1().equalsIgnoreCase(descriptor.sourceSha1());
         BundlePreference preference = updateStoredBundleMetadata(storedPreference, descriptor);
-        if (hashChanged) {
-            if (!findBundleRecords(descriptor.bundleId()).isEmpty()) {
-                uninstallBundle(descriptor.bundleId(), null);
-            }
-            clearBundleFailures(descriptor.bundleId());
-            savePreference(preference);
-        } else if (!Objects.equals(storedPreference.getSourceSha1(), descriptor.sourceSha1())
-                || !storedPreference.getSourceZipName().equalsIgnoreCase(descriptor.sourceZipName())) {
-            savePreference(preference);
-        }
-
         if (preference.isBundleDisabled()) {
+            if (hashChanged || !Objects.equals(storedPreference.getSourceSha1(), descriptor.sourceSha1())
+                    || !storedPreference.getSourceZipName().equalsIgnoreCase(descriptor.sourceZipName())) {
+                savePreference(preference);
+            }
             clearBundleFailures(descriptor.bundleId());
             return new BundleActionReport(
                     descriptor.bundleId(),
@@ -1189,12 +1220,14 @@ public final class BundleService {
         }
 
         VariantSelectionDecision selectionDecision = resolveVariantSelection(descriptor, preference, null, true);
-        if (selectionDecision.preference() != preference) {
-            savePreference(selectionDecision.preference());
-            preference = selectionDecision.preference();
-        }
+        preference = selectionDecision.preference();
 
         if (!hashChanged && !hasSyncWork(descriptor, selectionDecision.targetPackages())) {
+            if (!Objects.equals(storedPreference.getSourceSha1(), descriptor.sourceSha1())
+                    || !storedPreference.getSourceZipName().equalsIgnoreCase(descriptor.sourceZipName())
+                    || selectionDecision.preference() != storedPreference) {
+                savePreference(selectionDecision.preference());
+            }
             clearBundleFailures(descriptor.bundleId());
             return new BundleActionReport(
                     descriptor.bundleId(),
@@ -1206,8 +1239,36 @@ public final class BundleService {
             );
         }
 
-        uninstallConflictingVariantPackages(descriptor, selectionDecision.targetPackages());
-        BundleActionReport report = installEnabledPackages(descriptor, selectionDecision.targetPackages(), preference, false);
+        List<String> installedPackagesBeforeSync = listInstalledPackageKeys(descriptor.bundleId());
+        List<String> criticalPackages = determineCriticalPackages(
+                descriptor,
+                selectionDecision.targetPackages(),
+                installedPackagesBeforeSync
+        );
+        BundleStateSnapshot snapshot = captureBundleState(descriptor.bundleId(), storedPreference.getSourceZipName());
+        BundlePreference finalPreference = preference;
+        BundleActionReport report = withBundleStateRollback(snapshot, hashChanged
+                || hasBundleMutationWork(descriptor.bundleId(), descriptor, selectionDecision.targetPackages()), () -> {
+            if (hashChanged && !installedPackagesBeforeSync.isEmpty()) {
+                uninstallBundle(descriptor.bundleId(), null);
+            }
+            uninstallConflictingVariantPackages(descriptor, selectionDecision.targetPackages());
+            BundleActionReport installReport = installEnabledPackages(
+                    descriptor,
+                    selectionDecision.targetPackages(),
+                    finalPreference,
+                    false
+            );
+            ensureRequiredPackagesInstalled(
+                    descriptor.bundleId(),
+                    criticalPackages,
+                    installReport,
+                    "Bundle sync failed."
+            );
+            savePreference(finalPreference);
+            clearBundleFailures(descriptor.bundleId());
+            return installReport;
+        });
         ArrayList<String> messages = new ArrayList<>(contextualizeBundleMessages(descriptor, selectionDecision.messages()));
         if (hashChanged) {
             messages.add(formatBundleScopedMessage(descriptor, "Bundle content changed. Reinstalled from updated source."));
@@ -2099,6 +2160,14 @@ public final class BundleService {
         stateStore.savePreference(preference);
     }
 
+    private boolean preferenceExists(String bundleId) {
+        return stateStore.preferenceExists(bundleId);
+    }
+
+    private void deletePreference(String bundleId) throws BundleException {
+        stateStore.deletePreference(bundleId);
+    }
+
     private BundlePreference updateStoredBundleMetadata(
             BundlePreference preference,
             BundleArchiveDescriptor descriptor
@@ -2381,29 +2450,27 @@ public final class BundleService {
         saveYaml(config, configPath);
     }
 
-    private void safeRollbackConfigMutations(List<BundleRecord.ConfigMutation> mutations) {
-        try {
-            rollbackConfigMutations(mutations);
-        } catch (BundleException ex) {
-            plugin.getLogger().warning("Failed to rollback config mutation: " + ex.getMessage());
-        }
-    }
-
     private void rollbackInstall(
             List<BundleRecord.InstalledFile> installedFiles,
             Collection<String> createdDirectories
-    ) {
-        List<BundleRecord.InstalledFile> reversedFiles = new ArrayList<>(installedFiles);
-        reversedFiles.sort(Comparator.comparingInt((BundleRecord.InstalledFile file) -> file.getTargetPath().length()).reversed());
-        for (BundleRecord.InstalledFile installedFile : reversedFiles) {
-            deleteIfExists(resolveServerPath(installedFile.getTargetPath()));
-        }
-
+    ) throws BundleException {
+        deleteInstalledFiles(installedFiles);
         restoreBackups(installedFiles);
         deleteCreatedDirectories(createdDirectories);
     }
 
-    private void restoreBackups(List<BundleRecord.InstalledFile> installedFiles) {
+    private void deleteInstalledFiles(List<BundleRecord.InstalledFile> installedFiles) throws BundleException {
+        List<BundleRecord.InstalledFile> reversedFiles = new ArrayList<>(installedFiles);
+        reversedFiles.sort(Comparator.comparingInt((BundleRecord.InstalledFile file) -> file.getTargetPath().length()).reversed());
+        for (BundleRecord.InstalledFile installedFile : reversedFiles) {
+            deletePathOrThrow(
+                    resolveServerPath(installedFile.getTargetPath()),
+                    "installed file " + installedFile.getTargetPath()
+            );
+        }
+    }
+
+    private void restoreBackups(List<BundleRecord.InstalledFile> installedFiles) throws BundleException {
         for (BundleRecord.InstalledFile installedFile : installedFiles) {
             if (installedFile.getBackupPath() == null || installedFile.getBackupPath().isBlank()) {
                 continue;
@@ -2419,12 +2486,12 @@ public final class BundleService {
                 createDirectory(targetPath.getParent());
                 Files.copy(backupPath, targetPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
             } catch (IOException ex) {
-                throw new UncheckedIOException(ex);
+                throw new BundleException("Failed to restore backup for " + installedFile.getTargetPath() + ".", ex);
             }
         }
     }
 
-    private void deleteCreatedDirectories(Collection<String> createdDirectories) {
+    private void deleteCreatedDirectories(Collection<String> createdDirectories) throws BundleException {
         List<String> ordered = new ArrayList<>(createdDirectories);
         ordered.sort(Comparator.comparingInt(String::length).reversed());
         for (String relativeDirectory : ordered) {
@@ -2434,15 +2501,400 @@ public final class BundleService {
             } catch (DirectoryNotEmptyException ignored) {
                 // Leave the directory alone if other files still use it.
             } catch (IOException ex) {
-                plugin.getLogger().warning("Failed to delete directory " + directoryPath + ": " + ex.getMessage());
+                throw new BundleException("Failed to delete directory " + relativeDirectory + ".", ex);
             }
         }
     }
 
-    private void cleanupTransientArtifacts(String recordId) {
-        // Records are persisted separately; backups are only temporary rollback/uninstall data.
+    private void cleanupFailedInstallArtifacts(String recordId) {
         deleteIfExists(stateStore.getRecordFile(recordId).toPath());
         deleteRecursively(backupDirectory.toPath().resolve(recordId));
+    }
+
+    private void cleanupUninstalledRecord(String recordId) throws BundleException {
+        deletePathOrThrow(stateStore.getRecordFile(recordId).toPath(), "bundle record " + recordId);
+        deleteRecursivelyOrThrow(backupDirectory.toPath().resolve(recordId), "backup directory for " + recordId);
+    }
+
+    private BundleStateSnapshot captureBundleState(String bundleId, String sourceZipName) throws BundleException {
+        BundlePreference preference = loadPreference(bundleId, sourceZipName);
+        boolean preferenceExists = preferenceExists(bundleId);
+        List<BundleRecord> records = new ArrayList<>(findBundleRecords(bundleId));
+        LinkedHashMap<String, String> packageFailures = new LinkedHashMap<>();
+        Map<String, String> currentFailures = failedPackageMessages.get(bundleId);
+        if (currentFailures != null) {
+            packageFailures.putAll(currentFailures);
+        }
+
+        Path snapshotDirectory = null;
+        if (!records.isEmpty()) {
+            snapshotDirectory = backupDirectory.toPath()
+                    .resolve("_transactions")
+                    .resolve(bundleId + "-" + UUID.randomUUID());
+            createDirectory(snapshotDirectory);
+            for (BundleRecord record : records) {
+                snapshotRecordState(record, snapshotDirectory);
+            }
+        }
+
+        return new BundleStateSnapshot(
+                bundleId,
+                preference,
+                preferenceExists,
+                new ArrayList<>(records),
+                packageFailures,
+                snapshotDirectory
+        );
+    }
+
+    private void snapshotRecordState(BundleRecord record, Path snapshotDirectory) throws BundleException {
+        for (BundleRecord.InstalledFile installedFile : record.getInstalledFiles()) {
+            Path targetPath = resolveServerPath(installedFile.getTargetPath());
+            if (!Files.exists(targetPath)) {
+                continue;
+            }
+            Path snapshotPath = snapshotInstalledFilePath(snapshotDirectory, record.getId(), installedFile.getTargetPath());
+            copyRecursivelyOrThrow(targetPath, snapshotPath, "installed file snapshot " + installedFile.getTargetPath());
+        }
+
+        Path backupPath = backupDirectory.toPath().resolve(record.getId());
+        if (Files.exists(backupPath)) {
+            copyRecursivelyOrThrow(
+                    backupPath,
+                    snapshotBackupDirectoryPath(snapshotDirectory, record.getId()),
+                    "backup snapshot for " + record.getId()
+            );
+        }
+    }
+
+    private void restoreBundleState(BundleStateSnapshot snapshot) throws BundleException {
+        List<BundleRecord> currentRecords = findBundleRecords(snapshot.bundleId());
+        currentRecords.sort(Comparator.comparing(BundleRecord::getPackageKey).reversed());
+        for (BundleRecord currentRecord : currentRecords) {
+            uninstallPackage(currentRecord);
+        }
+
+        for (BundleRecord record : snapshot.records()) {
+            restoreRecordState(record, snapshot.snapshotDirectory());
+        }
+
+        restorePreferenceSnapshot(snapshot);
+        restorePackageFailures(snapshot);
+    }
+
+    private void restoreRecordState(BundleRecord record, Path snapshotDirectory) throws BundleException {
+        if (snapshotDirectory != null) {
+            Path currentBackupPath = backupDirectory.toPath().resolve(record.getId());
+            deleteRecursivelyOrThrow(currentBackupPath, "backup directory for " + record.getId());
+
+            Path backupSnapshotPath = snapshotBackupDirectoryPath(snapshotDirectory, record.getId());
+            if (Files.exists(backupSnapshotPath)) {
+                copyRecursivelyOrThrow(
+                        backupSnapshotPath,
+                        currentBackupPath,
+                        "backup restore for " + record.getId()
+                );
+            }
+
+            for (BundleRecord.InstalledFile installedFile : record.getInstalledFiles()) {
+                Path sourceSnapshot = snapshotInstalledFilePath(snapshotDirectory, record.getId(), installedFile.getTargetPath());
+                if (!Files.exists(sourceSnapshot)) {
+                    continue;
+                }
+
+                Path targetPath = resolveServerPath(installedFile.getTargetPath());
+                createDirectory(targetPath.getParent());
+                copyRecursivelyOrThrow(sourceSnapshot, targetPath, "installed file restore " + installedFile.getTargetPath());
+            }
+        }
+
+        ArrayList<String> warnings = new ArrayList<>();
+        List<BundleRecord.ConfigMutation> restoredMutations = applyConfigMutations(record.getConfigMutations(), warnings);
+        if (restoredMutations.size() != record.getConfigMutations().size() || !warnings.isEmpty()) {
+            throw new BundleException("Failed to restore config mutations for package '" + record.getPackageKey() + "'.");
+        }
+
+        stateStore.saveRecord(record);
+    }
+
+    private void restorePreferenceSnapshot(BundleStateSnapshot snapshot) throws BundleException {
+        if (snapshot.preferenceExists()) {
+            savePreference(snapshot.preference());
+            return;
+        }
+
+        deletePreference(snapshot.bundleId());
+    }
+
+    private void restorePackageFailures(BundleStateSnapshot snapshot) {
+        if (snapshot.packageFailures().isEmpty()) {
+            failedPackageMessages.remove(snapshot.bundleId());
+            return;
+        }
+
+        failedPackageMessages.put(snapshot.bundleId(), new LinkedHashMap<>(snapshot.packageFailures()));
+    }
+
+    private void cleanupBundleStateSnapshot(BundleStateSnapshot snapshot) {
+        if (snapshot.snapshotDirectory() == null) {
+            return;
+        }
+        deleteRecursively(snapshot.snapshotDirectory());
+    }
+
+    private Path snapshotInstalledFilePath(Path snapshotDirectory, String recordId, String targetPath) throws BundleException {
+        return snapshotDirectory.resolve("files")
+                .resolve(recordId)
+                .resolve(PathUtils.normalizeRelativePath(targetPath))
+                .normalize();
+    }
+
+    private Path snapshotBackupDirectoryPath(Path snapshotDirectory, String recordId) {
+        return snapshotDirectory.resolve("backups").resolve(recordId).normalize();
+    }
+
+    private <T> T withBundleStateRollback(
+            BundleStateSnapshot snapshot,
+            boolean touchesInstalledState,
+            BundleStateOperation<T> operation
+    ) throws BundleException {
+        boolean cleanupSnapshot = false;
+        try {
+            T result = operation.run();
+            cleanupSnapshot = true;
+            return result;
+        } catch (BundleException | RuntimeException ex) {
+            BundleException failure = asBundleException(ex, "Bundle operation failed.");
+            try {
+                if (touchesInstalledState) {
+                    restoreBundleState(snapshot);
+                } else {
+                    restorePreferenceSnapshot(snapshot);
+                    restorePackageFailures(snapshot);
+                }
+                cleanupSnapshot = true;
+            } catch (BundleException rollbackException) {
+                BundleException combined = new BundleException(
+                        failure.getMessage() + " Automatic rollback failed: " + rollbackException.getMessage(),
+                        failure
+                );
+                combined.addSuppressed(rollbackException);
+                throw combined;
+            }
+            throw failure;
+        } finally {
+            if (cleanupSnapshot) {
+                cleanupBundleStateSnapshot(snapshot);
+            }
+        }
+    }
+
+    private void ensureRequiredPackagesInstalled(
+            String bundleId,
+            List<String> requiredPackages,
+            BundleActionReport report,
+            String failurePrefix
+    ) throws BundleException {
+        if (requiredPackages.isEmpty()) {
+            return;
+        }
+
+        List<String> installedPackages = listInstalledPackageKeys(bundleId);
+        ArrayList<String> missingPackages = new ArrayList<>();
+        for (String requiredPackage : requiredPackages) {
+            if (!containsIgnoreCase(installedPackages, requiredPackage)) {
+                missingPackages.add(requiredPackage);
+            }
+        }
+
+        if (missingPackages.isEmpty()) {
+            return;
+        }
+
+        String details = report.getMessages().isEmpty()
+                ? ""
+                : " " + report.getMessages().get(report.getMessages().size() - 1);
+        throw new BundleException(
+                failurePrefix + " Missing packages: " + String.join(", ", deduplicatePackages(missingPackages)) + "." + details
+        );
+    }
+
+    private boolean hasBundleMutationWork(
+            String bundleId,
+            BundleArchiveDescriptor descriptor,
+            List<String> targetPackages
+    ) {
+        List<String> installedPackages = listInstalledPackageKeys(bundleId);
+        for (String targetPackage : targetPackages) {
+            if (!containsIgnoreCase(installedPackages, targetPackage)) {
+                return true;
+            }
+        }
+
+        for (BundleVariantGroup variantGroup : descriptor.variantGroups()) {
+            String selectedPackage = targetPackages.stream()
+                    .filter(target -> variantGroup.options().stream().anyMatch(option -> option.packageKey().equalsIgnoreCase(target)))
+                    .findFirst()
+                    .orElse(null);
+            for (BundleVariantOption option : variantGroup.options()) {
+                if (selectedPackage != null && option.packageKey().equalsIgnoreCase(selectedPackage)) {
+                    continue;
+                }
+                if (containsIgnoreCase(installedPackages, option.packageKey())) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private List<String> determineCriticalPackages(
+            BundleArchiveDescriptor descriptor,
+            List<String> targetPackages,
+            List<String> installedPackages
+    ) {
+        ArrayList<String> criticalPackages = new ArrayList<>();
+        for (String targetPackage : targetPackages) {
+            if (containsIgnoreCase(installedPackages, targetPackage)) {
+                criticalPackages.add(targetPackage);
+                continue;
+            }
+
+            for (String installedPackage : installedPackages) {
+                if (basePluginKey(installedPackage).equalsIgnoreCase(basePluginKey(targetPackage))) {
+                    criticalPackages.add(targetPackage);
+                    break;
+                }
+            }
+        }
+        return deduplicatePackages(criticalPackages);
+    }
+
+    private BundleException rollbackBatchInstallFailure(
+            List<BundleInstallResult> installedResults,
+            Throwable failure
+    ) {
+        BundleException bundleException = asBundleException(failure, "Failed to install bundle.");
+        if (installedResults.isEmpty()) {
+            return bundleException;
+        }
+
+        try {
+            rollbackInstalledResults(installedResults);
+            return bundleException;
+        } catch (BundleException rollbackException) {
+            BundleException combined = new BundleException(
+                    bundleException.getMessage()
+                            + " Automatic rollback of earlier packages failed: "
+                            + rollbackException.getMessage(),
+                    bundleException
+            );
+            combined.addSuppressed(rollbackException);
+            return combined;
+        }
+    }
+
+    private BundleException rollbackFailedPackageInstall(
+            String packageKey,
+            String recordId,
+            List<BundleRecord.ConfigMutation> appliedMutations,
+            List<BundleRecord.InstalledFile> installedFiles,
+            Collection<String> createdDirectories,
+            BundleException failure
+    ) {
+        boolean rollbackSucceeded = false;
+        try {
+            rollbackConfigMutations(appliedMutations);
+            rollbackInstall(installedFiles, createdDirectories);
+            rollbackSucceeded = true;
+            return failure;
+        } catch (BundleException rollbackException) {
+            BundleException combined = new BundleException(
+                    "Failed to install package '" + packageKey + "' and automatic rollback was incomplete: "
+                            + rollbackException.getMessage(),
+                    failure
+            );
+            combined.addSuppressed(rollbackException);
+            return combined;
+        } finally {
+            if (rollbackSucceeded) {
+                cleanupFailedInstallArtifacts(recordId);
+            }
+        }
+    }
+
+    private void rollbackInstalledResults(List<BundleInstallResult> installedResults) throws BundleException {
+        List<BundleInstallResult> reversedResults = new ArrayList<>(installedResults);
+        Collections.reverse(reversedResults);
+        for (BundleInstallResult installedResult : reversedResults) {
+            uninstallPackage(installedResult.getRecord());
+        }
+    }
+
+    private BundleException asBundleException(Throwable failure, String fallbackMessage) {
+        if (failure instanceof BundleException bundleException) {
+            return bundleException;
+        }
+
+        String message = failure.getMessage();
+        if (message == null || message.isBlank()) {
+            message = fallbackMessage;
+        }
+        return new BundleException(message, failure);
+    }
+
+    private void deletePathOrThrow(Path path, String description) throws BundleException {
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException ex) {
+            throw new BundleException("Failed to delete " + description + ".", ex);
+        }
+    }
+
+    private void deleteRecursivelyOrThrow(Path path, String description) throws BundleException {
+        if (path == null || !Files.exists(path)) {
+            return;
+        }
+
+        try {
+            List<Path> paths = Files.walk(path).sorted(Comparator.reverseOrder()).toList();
+            for (Path current : paths) {
+                Files.deleteIfExists(current);
+            }
+        } catch (IOException ex) {
+            throw new BundleException("Failed to delete " + description + ".", ex);
+        }
+    }
+
+    private void copyRecursivelyOrThrow(Path source, Path target, String description) throws BundleException {
+        if (source == null || !Files.exists(source)) {
+            return;
+        }
+
+        try {
+            if (Files.isDirectory(source)) {
+                try (var paths = Files.walk(source)) {
+                    for (Path current : paths.toList()) {
+                        Path relative = source.relativize(current);
+                        Path destination = relative.getNameCount() == 0 ? target : target.resolve(relative);
+                        if (Files.isDirectory(current)) {
+                            Files.createDirectories(destination);
+                            continue;
+                        }
+
+                        createDirectory(destination.getParent());
+                        Files.copy(current, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+                    }
+                }
+                return;
+            }
+
+            createDirectory(target.getParent());
+            Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+        } catch (IOException ex) {
+            throw new BundleException("Failed to copy " + description + ".", ex);
+        }
     }
 
     private void mergeConfigMutations(
@@ -2675,6 +3127,21 @@ public final class BundleService {
             builder.append(String.format("%02x", value));
         }
         return builder.toString();
+    }
+
+    @FunctionalInterface
+    private interface BundleStateOperation<T> {
+        T run() throws BundleException;
+    }
+
+    private record BundleStateSnapshot(
+            String bundleId,
+            BundlePreference preference,
+            boolean preferenceExists,
+            List<BundleRecord> records,
+            Map<String, String> packageFailures,
+            Path snapshotDirectory
+    ) {
     }
 
 }

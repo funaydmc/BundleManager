@@ -198,6 +198,146 @@ class BundleServiceTest {
     }
 
     @Test
+    void shouldRollbackEarlierPackagesWhenWholeBundleInstallFails() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path deluxeConfig = serverRoot.resolve("plugins/DeluxeMenus/config.yml");
+        Files.createDirectories(deluxeConfig.getParent());
+        Files.writeString(deluxeConfig, "gui_menus: {}\n");
+
+        Path existingMob = serverRoot.resolve("plugins/MythicMobs/Mobs/Zombie.yml");
+        Files.createDirectories(existingMob.getParent());
+        Files.writeString(existingMob, "zombie:\n  Type: ZOMBIE\n");
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/atomic-install.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "DeluxeMenus/main.yml", "menu_title: \"Main\"\nitems: {}\n",
+                "MythicMobs/Mobs/Zombie.yml", "zombie:\n  Type: ZOMBIE\n"
+        ));
+
+        BundleException exception = assertThrows(BundleException.class, () -> service.installBundle("atomic-install", null));
+        assertTrue(exception.getMessage().contains("Refusing to overwrite existing file"));
+        assertTrue(service.listInstalledBundles().isEmpty());
+        assertFalse(Files.exists(serverRoot.resolve("plugins/DeluxeMenus/gui_menus/main.yml")));
+        assertFalse(YamlConfiguration.loadConfiguration(deluxeConfig.toFile()).contains("gui_menus.main"));
+    }
+
+    @Test
+    void shouldKeepRecordWhenUninstallCannotDeleteInstalledFile() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path deluxeConfig = serverRoot.resolve("plugins/DeluxeMenus/config.yml");
+        Files.createDirectories(deluxeConfig.getParent());
+        Files.writeString(deluxeConfig, "gui_menus: {}\n");
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/uninstall-blocked.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "DeluxeMenus/main.yml", "menu_title: \"Main\"\nitems: {}\n"
+        ));
+
+        service.installBundle("uninstall-blocked", "DeluxeMenus");
+
+        Path installedMenu = serverRoot.resolve("plugins/DeluxeMenus/gui_menus/main.yml");
+        Files.delete(installedMenu);
+        Files.createDirectories(installedMenu);
+        Files.writeString(installedMenu.resolve("keep.txt"), "block uninstall");
+
+        BundleException exception = assertThrows(BundleException.class, () -> service.uninstallBundle("uninstall-blocked", "DeluxeMenus"));
+        assertTrue(exception.getMessage().contains("Failed to delete installed file"));
+        assertEquals(List.of("DeluxeMenus"), service.listInstalledPackageKeys("uninstall-blocked"));
+        assertFalse(YamlConfiguration.loadConfiguration(deluxeConfig.toFile()).contains("gui_menus.main"));
+
+        Files.delete(installedMenu.resolve("keep.txt"));
+        Files.delete(installedMenu);
+
+        service.uninstallBundle("uninstall-blocked", "DeluxeMenus");
+        assertTrue(service.listInstalledBundles().isEmpty());
+    }
+
+    @Test
+    void shouldNotPersistDisabledPreferenceWhenDisableFails() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path deluxeConfig = serverRoot.resolve("plugins/DeluxeMenus/config.yml");
+        Files.createDirectories(deluxeConfig.getParent());
+        Files.writeString(deluxeConfig, "gui_menus: {}\n");
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/disable-blocked.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "DeluxeMenus/main.yml", "menu_title: \"Main\"\nitems: {}\n"
+        ));
+
+        service.installBundle("disable-blocked", "DeluxeMenus");
+        String bundleId = service.listInstalledBundles().get(0).getBundleShortId();
+
+        Path installedMenu = serverRoot.resolve("plugins/DeluxeMenus/gui_menus/main.yml");
+        Files.delete(installedMenu);
+        Files.createDirectories(installedMenu);
+        Files.writeString(installedMenu.resolve("keep.txt"), "block disable");
+
+        assertThrows(BundleException.class, () -> service.disableBundleById(bundleId, null));
+
+        List<BundleStatusView> statusViews = service.listBundleStatusViews();
+        assertEquals(1, statusViews.size());
+        BundleStatusView statusView = statusViews.get(0);
+
+        assertEquals(BundleOverallState.SUCCESS, statusView.getOverallState());
+        assertTrue(statusView.getPackageViews().stream().anyMatch(view ->
+                view.getPackageKey().equals("DeluxeMenus") && view.getState() == BundlePackageState.SUCCESS
+        ));
+
+        Files.delete(installedMenu.resolve("keep.txt"));
+        Files.delete(installedMenu);
+        service.disableBundleById(bundleId, null);
+        assertTrue(service.listInstalledBundles().isEmpty());
+    }
+
+    @Test
+    void shouldRollbackEnableRequestWhenOnePackageFails() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path deluxeConfig = serverRoot.resolve("plugins/DeluxeMenus/config.yml");
+        Files.createDirectories(deluxeConfig.getParent());
+        Files.writeString(deluxeConfig, "gui_menus: {}\n");
+
+        Path conflictingMob = serverRoot.resolve("plugins/MythicMobs/Mobs/Zombie.yml");
+        Files.createDirectories(conflictingMob.getParent());
+        Files.writeString(conflictingMob, "external\n");
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/enable-rollback.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "DeluxeMenus/main.yml", "menu_title: \"Main\"\nitems: {}\n",
+                "MythicMobs/Mobs/Zombie.yml", "zombie:\n  Type: ZOMBIE\n"
+        ));
+
+        String bundleId = service.listKnownBundleIds().get(0);
+        service.disableBundleById(bundleId, null);
+
+        BundleException exception = assertThrows(BundleException.class, () -> service.enableBundleById(bundleId, null));
+        assertTrue(exception.getMessage().contains("Enable request failed"));
+        assertFalse(Files.exists(serverRoot.resolve("plugins/DeluxeMenus/gui_menus/main.yml")));
+        assertEquals("external\n", TestUtils.readString(conflictingMob));
+        assertTrue(service.listInstalledBundles().isEmpty());
+
+        YamlConfiguration preference = YamlConfiguration.loadConfiguration(
+                serverRoot.resolve("plugins/BundleManager/data/preferences/1.yml").toFile()
+        );
+        assertTrue(preference.getBoolean("bundleDisabled"));
+    }
+
+    @Test
     void shouldRenameDeluxeMenusFileOnlyWhenNaturalTargetAlreadyExists() throws Exception {
         Path serverRoot = tempDir.resolve("server");
         JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
@@ -547,6 +687,49 @@ class BundleServiceTest {
     }
 
     @Test
+    void shouldRollbackBundleReloadWhenUpdatedSourceCannotBeInstalled() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/changed-bundle.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "MythicMobs/Mobs/Zombie.yml", "zombie:\n  Type: ZOMBIE\n  Health: 20\n"
+        ));
+
+        BundleLoadReport firstLoad = service.autoLoadBundles();
+        assertEquals(1, firstLoad.getInstalledPackageCount());
+        String originalContents = TestUtils.readString(serverRoot.resolve("plugins/MythicMobs/Mobs/Zombie.yml"));
+        YamlConfiguration originalPreference = YamlConfiguration.loadConfiguration(
+                serverRoot.resolve("plugins/BundleManager/data/preferences/1.yml").toFile()
+        );
+        String originalSha = originalPreference.getString("sourceSha1");
+
+        Path conflictingFile = serverRoot.resolve("plugins/MythicMobs/Mobs/External.yml");
+        Files.createDirectories(conflictingFile.getParent());
+        Files.writeString(conflictingFile, "external\n");
+
+        TestUtils.createZip(bundleZip, Map.of(
+                "MythicMobs/Mobs/External.yml", "external_bundle:\n  Type: SKELETON\n"
+        ));
+
+        BundleLoadReport reload = service.autoLoadBundles();
+
+        assertEquals(1, reload.getInstalledPackageCount());
+        assertEquals(1, reload.getInstalledBundleCount());
+        assertFalse(reload.getErrors().isEmpty());
+        assertEquals(originalContents, TestUtils.readString(serverRoot.resolve("plugins/MythicMobs/Mobs/Zombie.yml")));
+        assertEquals("external\n", TestUtils.readString(conflictingFile));
+        assertEquals(List.of("MythicMobs"), service.listInstalledPackageKeys("1"));
+
+        YamlConfiguration restoredPreference = YamlConfiguration.loadConfiguration(
+                serverRoot.resolve("plugins/BundleManager/data/preferences/1.yml").toFile()
+        );
+        assertEquals(originalSha, restoredPreference.getString("sourceSha1"));
+    }
+
+    @Test
     void shouldReportAlreadyActivePackagesOnUnchangedReload() throws Exception {
         Path serverRoot = tempDir.resolve("server");
         JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
@@ -750,6 +933,41 @@ class BundleServiceTest {
         assertTrue(switchReport.getSucceededPackages().contains("MythicMobs@vanilla"));
         assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/VanillaMob.yml")));
         assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/ModelMob.yml")));
+    }
+
+    @Test
+    void shouldRestorePreviousVariantWhenSwitchVariantFails() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleRoot = serverRoot.resolve("plugins/BundleManager/bundles/MEGA_BUNDLE");
+        Files.createDirectories(bundleRoot.resolve("vanilla/MythicMobs/Mobs"));
+        Files.createDirectories(bundleRoot.resolve("MythicMobs (model)/Mobs"));
+        Files.writeString(bundleRoot.resolve("vanilla/MythicMobs/Mobs/VanillaMob.yml"), """
+                vanilla_knight:
+                  Type: ZOMBIE
+                """);
+        Files.writeString(bundleRoot.resolve("MythicMobs (model)/Mobs/ModelMob.yml"), """
+                model_knight:
+                  Type: SKELETON
+                """);
+
+        service.autoLoadBundles();
+
+        String bundleId = service.listInstalledBundles().get(0).getBundleShortId();
+        service.openVariantPrompt(bundleId);
+
+        Path conflictingVanillaFile = serverRoot.resolve("plugins/MythicMobs/Mobs/VanillaMob.yml");
+        Files.createDirectories(conflictingVanillaFile.getParent());
+        Files.writeString(conflictingVanillaFile, "external\n");
+
+        BundleException exception = assertThrows(BundleException.class, () -> service.switchVariant(2));
+        assertTrue(exception.getMessage().contains("Variant switch failed"));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/ModelMob.yml")));
+        assertEquals("external\n", TestUtils.readString(conflictingVanillaFile));
+        assertEquals(List.of("MythicMobs@model"), service.listInstalledPackageKeys(bundleId));
     }
 
     @Test

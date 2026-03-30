@@ -117,6 +117,21 @@ final class BundleStateStore {
         }
     }
 
+    boolean preferenceExists(String bundleId) {
+        return getPreferenceFile(bundleId).exists();
+    }
+
+    void deletePreference(String bundleId) throws BundleException {
+        File file = getPreferenceFile(bundleId);
+        if (!file.exists()) {
+            return;
+        }
+
+        if (!file.delete()) {
+            throw new BundleException("Failed to delete bundle preference " + bundleId + ".");
+        }
+    }
+
     List<BundleOverwriteConflict> listOverwriteConflicts() {
         File[] files = conflictDirectory.listFiles((dir, name) -> name.endsWith(".yml"));
         if (files == null || files.length == 0) {
@@ -290,9 +305,10 @@ final class BundleStateStore {
 
         List<BundleRecord.InstalledFile> installedFiles = new ArrayList<>();
         for (Map<?, ?> raw : config.getMapList("installedFiles")) {
+            Object pluginKey = raw.containsKey("pluginKey") ? raw.get("pluginKey") : raw.get("packageKey");
             installedFiles.add(new BundleRecord.InstalledFile(
                     stringValue(raw.get("sourceEntry")),
-                    stringValue(raw.get("packageKey")),
+                    stringValue(pluginKey),
                     stringValue(raw.get("targetPath")),
                     stringValue(raw.get("backupPath"))
             ));
