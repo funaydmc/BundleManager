@@ -103,3 +103,10 @@ If a bundle contains a package for a plugin that is installed on the server but 
 ```text
 ./gradlew build
 ```
+
+## CI/CD
+
+- `Build` workflow runs on pushes to `main`, pull requests, and manual dispatch
+- `Deploy` workflow publishes the built jar to GitHub Releases
+- Push a tag like `v1.0.0` to trigger a release automatically
+- Or run `Deploy` manually and provide the release tag to publish

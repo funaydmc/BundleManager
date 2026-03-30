@@ -31,6 +31,11 @@ tasks {
 }
 
 def targetJavaVersion = 17
+if (!JavaVersion.current().isCompatibleWith(JavaVersion.toVersion(targetJavaVersion))) {
+    throw new GradleException("BundleManager build requires Gradle to run on Java ${targetJavaVersion}+."
+            + " Current JVM: ${System.getProperty('java.version')} at ${System.getProperty('java.home')}")
+}
+
 java {
     def javaVersion = JavaVersion.toVersion(targetJavaVersion)
     sourceCompatibility = javaVersion
