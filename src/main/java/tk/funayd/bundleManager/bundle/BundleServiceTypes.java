@@ -11,11 +11,13 @@ record BundleArchiveDescriptor(
         List<String> installablePackages,
         List<String> allPackages,
         List<BundleVariantGroup> variantGroups,
-        List<VariantChoiceGroup> variantChoiceGroups
+        List<VariantChoiceGroup> variantChoiceGroups,
+        List<String> scanWarnings
 ) {
 }
 
 record ArchivePackageInfo(
+        List<BundlePackageDescriptor> packageDescriptors,
         List<String> installablePackages,
         List<String> allPackages,
         List<BundleVariantGroup> variantGroups,

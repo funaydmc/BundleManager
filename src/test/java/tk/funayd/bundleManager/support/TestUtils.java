@@ -1,5 +1,9 @@
 package tk.funayd.bundleManager.support;
 
+import org.bukkit.Server;
+import org.bukkit.plugin.Plugin;
+import org.bukkit.plugin.PluginDescriptionFile;
+import org.bukkit.plugin.PluginManager;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.mockito.Mockito;
 
@@ -19,12 +23,44 @@ public final class TestUtils {
     }
 
     public static JavaPlugin mockPlugin(Path serverRoot) throws IOException {
+        return mockPlugin(serverRoot,
+                "Blueprints",
+                "DeluxeMenus",
+                "ItemsAdder",
+                "MCPets",
+                "MMOItems",
+                "ModelEngine",
+                "MythicLib",
+                "MythicMobs",
+                "Nexo",
+                "Oraxen"
+        );
+    }
+
+    public static JavaPlugin mockPlugin(Path serverRoot, String... installedPluginNames) throws IOException {
         Path dataFolder = serverRoot.resolve("plugins/BundleManager");
         Files.createDirectories(dataFolder);
 
         JavaPlugin plugin = Mockito.mock(JavaPlugin.class);
+        Server server = Mockito.mock(Server.class);
+        PluginManager pluginManager = Mockito.mock(PluginManager.class);
         Mockito.when(plugin.getDataFolder()).thenReturn(dataFolder.toFile());
         Mockito.when(plugin.getLogger()).thenReturn(Logger.getLogger("BundleManagerTest"));
+        Mockito.when(plugin.getServer()).thenReturn(server);
+        Mockito.when(server.getPluginManager()).thenReturn(pluginManager);
+        Plugin[] installedPlugins = new Plugin[installedPluginNames.length];
+        for (int index = 0; index < installedPluginNames.length; index++) {
+            installedPlugins[index] = mockPluginEntry(installedPluginNames[index]);
+        }
+        Mockito.when(pluginManager.getPlugins()).thenReturn(installedPlugins);
+        return plugin;
+    }
+
+    private static Plugin mockPluginEntry(String pluginName) {
+        Plugin plugin = Mockito.mock(Plugin.class);
+        PluginDescriptionFile description = Mockito.mock(PluginDescriptionFile.class);
+        Mockito.when(description.getName()).thenReturn(pluginName);
+        Mockito.when(plugin.getDescription()).thenReturn(description);
         return plugin;
     }
 

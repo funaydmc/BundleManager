@@ -538,6 +538,50 @@ class BundleServiceTest {
     }
 
     @Test
+    void shouldWarnWhenSupportedPluginPackageExistsButPluginIsNotInstalled() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot, "MythicMobs");
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/itemsadder-missing.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "ItemsAdder/contents/my_pack/configs/example.yml", "enabled: true\n"
+        ));
+
+        BundleLoadReport report = service.autoLoadBundles();
+
+        assertEquals(0, report.getInstalledPackageCount());
+        assertTrue(report.getWarnings().stream().anyMatch(message ->
+                message.contains("[itemsadder-missing.zip]")
+                        && message.contains("Plugin 'ItemsAdder' is not installed")
+                        && message.contains("https://itemsadder.devs.beer/first-install")
+        ));
+    }
+
+    @Test
+    void shouldWarnWhenInstalledPluginAppearsInBundleButInstallerIsMissing() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot, "AdvancedEnchantments");
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/unsupported-installed-plugin.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "AdvancedEnchantments/books/example.yml", "test: true\n"
+        ));
+
+        BundleLoadReport report = service.autoLoadBundles();
+
+        assertEquals(0, report.getInstalledPackageCount());
+        assertTrue(report.getWarnings().stream().anyMatch(message ->
+                message.contains("[unsupported-installed-plugin.zip]")
+                        && message.contains("Plugin 'AdvancedEnchantments' is installed on the server")
+                        && message.contains("https://github.com/funaydmc/BundleManager/issues")
+        ));
+    }
+
+    @Test
     void shouldInstallRootResourcePackToBundleManagerPackDirectory() throws Exception {
         Path serverRoot = tempDir.resolve("server");
         JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);

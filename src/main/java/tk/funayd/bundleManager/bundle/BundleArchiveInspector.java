@@ -8,6 +8,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.TreeSet;
 
@@ -19,10 +20,13 @@ final class BundleArchiveInspector {
         this.installerRegistry = installerRegistry;
     }
 
-    ArchivePackageInfo inspectArchivePackages(BundleArchive archive) throws BundleException {
+    ArchivePackageInfo inspectArchivePackages(
+            BundleArchive archive,
+            Map<String, String> installedPluginNames
+    ) throws BundleException {
         TreeSet<String> installable = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         TreeSet<String> allPackages = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        List<BundlePackageDescriptor> descriptors = discoverPackageDescriptors(archive);
+        List<BundlePackageDescriptor> descriptors = discoverPackageDescriptors(archive, installedPluginNames);
         List<BundleVariantGroup> variantGroups = buildVariantGroups(descriptors);
         for (BundlePackageDescriptor packageDescriptor : descriptors) {
             allPackages.add(packageDescriptor.packageKey());
@@ -31,6 +35,7 @@ final class BundleArchiveInspector {
             }
         }
         return new ArchivePackageInfo(
+                descriptors,
                 new ArrayList<>(installable),
                 new ArrayList<>(allPackages),
                 variantGroups,
@@ -38,10 +43,13 @@ final class BundleArchiveInspector {
         );
     }
 
-    List<BundlePackageDescriptor> discoverPackageDescriptors(BundleArchive archive) throws BundleException {
+    List<BundlePackageDescriptor> discoverPackageDescriptors(
+            BundleArchive archive,
+            Map<String, String> installedPluginNames
+    ) throws BundleException {
         ArchiveDirectoryNode root = buildDirectoryTree(archive.entries());
         ArrayList<DiscoveredPackageRoot> discoveredRoots = new ArrayList<>();
-        discoverPackageRoots(root, discoveredRoots);
+        discoverPackageRoots(root, discoveredRoots, installedPluginNames);
         return buildPackageDescriptors(discoveredRoots);
     }
 
@@ -74,7 +82,8 @@ final class BundleArchiveInspector {
 
     private void discoverPackageRoots(
             ArchiveDirectoryNode current,
-            List<DiscoveredPackageRoot> discoveredRoots
+            List<DiscoveredPackageRoot> discoveredRoots,
+            Map<String, String> installedPluginNames
     ) throws BundleException {
         // Gap root resource pack truoc de khong dao sau vao pack con.
         if (containsPackMcmeta(current)) {
@@ -102,13 +111,25 @@ final class BundleArchiveInspector {
                     ));
                     return;
                 }
+
+                String installedPluginName = installedPluginNames.get(folderInfo.pluginName().toLowerCase(Locale.ROOT));
+                if (installedPluginName != null) {
+                    discoveredRoots.add(new DiscoveredPackageRoot(
+                            installedPluginName,
+                            current.path,
+                            false,
+                            collectEntries(current),
+                            buildPluginVariantParts(current.segments)
+                    ));
+                    return;
+                }
             }
         }
 
         ArrayList<ArchiveDirectoryNode> children = new ArrayList<>(current.children.values());
         children.sort(Comparator.comparing(node -> node.name, String.CASE_INSENSITIVE_ORDER));
         for (ArchiveDirectoryNode child : children) {
-            discoverPackageRoots(child, discoveredRoots);
+            discoverPackageRoots(child, discoveredRoots, installedPluginNames);
         }
     }
 

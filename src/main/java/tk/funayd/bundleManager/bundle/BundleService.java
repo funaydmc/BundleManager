@@ -2,6 +2,7 @@ package tk.funayd.bundleManager.bundle;
 
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 import tk.funayd.bundleManager.installer.BundleInstallIdentity;
 import tk.funayd.bundleManager.installer.InstallerRegistry;
@@ -39,6 +40,19 @@ public final class BundleService {
 
     private static final String APPEND_STRING_LIST = "APPEND_STRING_LIST";
     private static final String REGISTER_SECTION_FILE = "REGISTER_SECTION_FILE";
+    private static final String ISSUE_URL = "https://github.com/funaydmc/BundleManager/issues";
+    private static final Map<String, String> OFFICIAL_PLUGIN_URLS = Map.ofEntries(
+            Map.entry("Blueprints", "https://github.com/funaydmc/BundleManager/issues"),
+            Map.entry("DeluxeMenus", "https://wiki.helpch.at/helpchat-plugins/deluxemenus"),
+            Map.entry("ItemsAdder", "https://itemsadder.devs.beer/first-install"),
+            Map.entry("MCPets", "https://mcpets.gitbook.io/mcpets"),
+            Map.entry("MMOItems", "https://git.mythiccraft.io/root/mmoitems/-/wikis/home"),
+            Map.entry("ModelEngine", "https://git.mythiccraft.io/mythiccraft/MythicMobs/-/wikis/Model-Engine"),
+            Map.entry("MythicLib", "https://git.mythiccraft.io/mythiccraft/MythicLib/-/wikis/home"),
+            Map.entry("MythicMobs", "https://git.mythiccraft.io/mythiccraft/MythicMobs/-/wikis/home"),
+            Map.entry("Nexo", "https://docs.nexomc.com/"),
+            Map.entry("Oraxen", "https://docs.oraxen.com/")
+    );
 
     private final JavaPlugin plugin;
     private final InstallerRegistry installerRegistry;
@@ -245,6 +259,7 @@ public final class BundleService {
         }
 
         for (BundleArchiveDescriptor descriptor : descriptors) {
+            warnings.addAll(descriptor.scanWarnings());
             try {
                 BundleActionReport report = reconcileBundle(descriptor);
                 if (!report.getSucceededPackages().isEmpty()) {
@@ -565,24 +580,29 @@ public final class BundleService {
 
         try (BundleArchive archive = openArchive(archiveFile)) {
             // Ho tro tim package o bat ky do sau nao trong bundle de xu ly variant.
-            List<BundlePackageDescriptor> packageDescriptors = discoverPackageDescriptors(archive);
+            ArchivePackageInfo packageInfo = archiveInspector.inspectArchivePackages(archive, installedServerPluginNames());
+            List<BundlePackageDescriptor> packageDescriptors = packageInfo.packageDescriptors();
             if (packageDescriptors.isEmpty()) {
                 throw new BundleException("Bundle must contain plugin package directories.");
             }
 
+            BundleArchiveDescriptor descriptor = new BundleArchiveDescriptor(
+                    bundleId,
+                    archiveFile.getName(),
+                    "",
+                    packageInfo.installablePackages(),
+                    packageInfo.allPackages(),
+                    packageInfo.variantGroups(),
+                    packageInfo.variantChoiceGroups(),
+                    List.of()
+            );
+            List<String> discoveryWarnings = buildBundleScanWarnings(descriptor, packageDescriptors);
             List<BundlePackageDescriptor> installablePackages = resolveRequestedPackages(packageDescriptors, requestedPackageKey);
             for (BundlePackageDescriptor packageDescriptor : installablePackages) {
                 String recordId = recordId(bundleId, packageDescriptor.packageKey());
                 if (stateStore.recordExists(recordId)) {
                     throw new BundleException("Package '" + packageDescriptor.packageKey()
                             + "' is already installed for bundle " + bundleIdShort + ".");
-                }
-            }
-
-            List<String> unsupportedWarnings = new ArrayList<>();
-            for (BundlePackageDescriptor packageDescriptor : packageDescriptors) {
-                if (!packageDescriptor.supported()) {
-                    unsupportedWarnings.add("Unsupported package skipped: " + packageDescriptor.packageKey());
                 }
             }
 
@@ -599,13 +619,19 @@ public final class BundleService {
             }
 
             if (results.isEmpty()) {
+                if (requestedPackageKey != null && !requestedPackageKey.isBlank()) {
+                    String packageKey = resolvePackageKey(packageInfo.allPackages(), requestedPackageKey);
+                    if (!isPluginPackageInstallable(packageKey)) {
+                        throw new BundleException(buildMissingPluginMessage(basePluginKey(packageKey)));
+                    }
+                }
                 throw new BundleException("No supported packages were installed from " + archiveFile.getName() + ".");
             }
 
-            if (!unsupportedWarnings.isEmpty()) {
+            if (!discoveryWarnings.isEmpty()) {
                 BundleInstallResult first = results.get(0);
-                ArrayList<String> combinedWarnings = new ArrayList<>(unsupportedWarnings.size() + first.getWarnings().size());
-                combinedWarnings.addAll(unsupportedWarnings);
+                ArrayList<String> combinedWarnings = new ArrayList<>(discoveryWarnings.size() + first.getWarnings().size());
+                combinedWarnings.addAll(discoveryWarnings);
                 combinedWarnings.addAll(first.getWarnings());
                 results.set(0, new BundleInstallResult(first.getRecord(), combinedWarnings));
             }
@@ -1022,6 +1048,9 @@ public final class BundleService {
         if (requestedPackageKey != null && !requestedPackageKey.isBlank()) {
             for (BundlePackageDescriptor packageDescriptor : packageDescriptors) {
                 if (packageDescriptor.supported() && packageDescriptor.packageKey().equalsIgnoreCase(requestedPackageKey)) {
+                    if (!isPluginPackageInstallable(packageDescriptor.packageKey())) {
+                        throw new BundleException(buildMissingPluginMessage(packageDescriptor.pluginKey()));
+                    }
                     return List.of(packageDescriptor);
                 }
             }
@@ -1030,7 +1059,7 @@ public final class BundleService {
 
         ArrayList<BundlePackageDescriptor> installable = new ArrayList<>();
         for (BundlePackageDescriptor packageDescriptor : packageDescriptors) {
-            if (packageDescriptor.supported()) {
+            if (packageDescriptor.supported() && isPluginPackageInstallable(packageDescriptor.packageKey())) {
                 installable.add(packageDescriptor);
             }
         }
@@ -1228,6 +1257,16 @@ public final class BundleService {
 
             if (containsIgnoreCase(listInstalledPackageKeys(descriptor.bundleId()), installablePackage)) {
                 clearPackageFailure(descriptor.bundleId(), installablePackage);
+                continue;
+            }
+
+            if (!isPluginPackageInstallable(installablePackage)) {
+                clearPackageFailure(descriptor.bundleId(), installablePackage);
+                messages.add(formatPackageScopedMessage(
+                        descriptor,
+                        installablePackage,
+                        buildMissingPluginMessage(basePluginKey(installablePackage))
+                ));
                 continue;
             }
 
@@ -1549,6 +1588,71 @@ public final class BundleService {
         return separator < 0 ? packageKey : packageKey.substring(0, separator);
     }
 
+    private List<String> buildBundleScanWarnings(
+            BundleArchiveDescriptor descriptor,
+            List<BundlePackageDescriptor> packageDescriptors
+    ) {
+        ArrayList<String> warnings = new ArrayList<>();
+        for (BundlePackageDescriptor packageDescriptor : packageDescriptors) {
+            String pluginKey = packageDescriptor.pluginKey();
+            if (packageDescriptor.supported()) {
+                if (!isPluginPackageInstallable(packageDescriptor.packageKey())) {
+                    warnings.add(formatPackageScopedMessage(
+                            descriptor,
+                            packageDescriptor.packageKey(),
+                            buildMissingPluginMessage(pluginKey)
+                    ));
+                }
+                continue;
+            }
+
+            if (isInstalledServerPlugin(pluginKey)) {
+                warnings.add(formatPackageScopedMessage(
+                        descriptor,
+                        packageDescriptor.packageKey(),
+                        "Plugin '" + pluginKey + "' is installed on the server, but BundleManager does not support this package yet. "
+                                + "Please open an issue: " + ISSUE_URL
+                ));
+            }
+        }
+        return deduplicatePackages(warnings);
+    }
+
+    private String buildMissingPluginMessage(String pluginKey) {
+        String officialUrl = OFFICIAL_PLUGIN_URLS.get(pluginKey);
+        if (officialUrl == null || officialUrl.isBlank()) {
+            return "Plugin '" + pluginKey + "' is not installed on the server.";
+        }
+        return "Plugin '" + pluginKey + "' is not installed on the server. Official download: " + officialUrl;
+    }
+
+    private boolean isPluginPackageInstallable(String packageKey) {
+        String pluginKey = basePluginKey(packageKey);
+        return "ResourcePack".equalsIgnoreCase(pluginKey) || isInstalledServerPlugin(pluginKey);
+    }
+
+    private boolean isInstalledServerPlugin(String pluginKey) {
+        return installedServerPluginNames().containsKey(pluginKey.toLowerCase(Locale.ROOT));
+    }
+
+    private Map<String, String> installedServerPluginNames() {
+        LinkedHashMap<String, String> installed = new LinkedHashMap<>();
+        if (plugin.getServer() == null || plugin.getServer().getPluginManager() == null) {
+            return installed;
+        }
+        for (Plugin installedPlugin : plugin.getServer().getPluginManager().getPlugins()) {
+            if (installedPlugin == null || installedPlugin.getDescription() == null) {
+                continue;
+            }
+            String pluginName = installedPlugin.getDescription().getName();
+            if (pluginName == null || pluginName.isBlank()) {
+                continue;
+            }
+            installed.put(pluginName.toLowerCase(Locale.ROOT), pluginName);
+        }
+        return installed;
+    }
+
     private String resolvePackageKey(List<String> packageKeys, String requestedPackageKey) throws BundleException {
         for (String packageKey : packageKeys) {
             if (packageKey.equalsIgnoreCase(requestedPackageKey)) {
@@ -1754,14 +1858,25 @@ public final class BundleService {
                 String bundleId = stateStore.computeBundleId(file, plugin.getLogger());
                 String sourceSha1 = computeSourceSha1(file);
                 ArchivePackageInfo packageInfo = inspectArchivePackages(file);
-                descriptors.add(new BundleArchiveDescriptor(
+                BundleArchiveDescriptor descriptor = new BundleArchiveDescriptor(
                         bundleId,
                         file.getName(),
                         sourceSha1,
                         packageInfo.installablePackages(),
                         packageInfo.allPackages(),
                         packageInfo.variantGroups(),
-                        packageInfo.variantChoiceGroups()
+                        packageInfo.variantChoiceGroups(),
+                        List.of()
+                );
+                descriptors.add(new BundleArchiveDescriptor(
+                        descriptor.bundleId(),
+                        descriptor.sourceZipName(),
+                        descriptor.sourceSha1(),
+                        descriptor.installablePackages(),
+                        descriptor.allPackages(),
+                        descriptor.variantGroups(),
+                        descriptor.variantChoiceGroups(),
+                        buildBundleScanWarnings(descriptor, packageInfo.packageDescriptors())
                 ));
             } catch (BundleException | IOException ex) {
                 plugin.getLogger().warning("Failed to inspect bundle " + file.getName() + ": " + ex.getMessage());
@@ -1773,12 +1888,12 @@ public final class BundleService {
 
     private ArchivePackageInfo inspectArchivePackages(File archiveFile) throws BundleException, IOException {
         try (BundleArchive archive = openArchive(archiveFile)) {
-            return archiveInspector.inspectArchivePackages(archive);
+            return archiveInspector.inspectArchivePackages(archive, installedServerPluginNames());
         }
     }
 
     private List<BundlePackageDescriptor> discoverPackageDescriptors(BundleArchive archive) throws BundleException {
-        return archiveInspector.discoverPackageDescriptors(archive);
+        return archiveInspector.discoverPackageDescriptors(archive, installedServerPluginNames());
     }
 
     private String trimPackageRoot(String entryPath, String packageRootPath) throws BundleException {
