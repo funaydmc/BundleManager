@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import tk.funayd.bundleManager.support.TestUtils;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -16,6 +19,7 @@ import java.util.zip.ZipOutputStream;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -1139,6 +1143,89 @@ class BundleServiceTest {
         List<BundleStatusView> views = service.listBundleStatusViews();
 
         assertEquals(List.of("1", "2", "10"), views.stream().map(BundleStatusView::getBundleId).toList());
+    }
+
+    @Test
+    void shouldInstallBundleWhenZipFileCentralDirectoryIsMalformed() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path itemsAdderConfig = serverRoot.resolve("plugins/ItemsAdder/config.yml");
+        Files.createDirectories(itemsAdderConfig.getParent());
+        Files.writeString(itemsAdderConfig, "contents-folders-priorities: []\n");
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/malformed-central-directory.zip");
+        Path archiveCompatibilityCache = serverRoot.resolve("plugins/BundleManager/data/archive-compatibility.yml");
+        createMalformedCentralDirectoryZip(bundleZip, Map.of(
+                "ItemsAdder/contents/malformed_pack/configs/example.yml", "enabled: true\n".getBytes(StandardCharsets.UTF_8),
+                "README.md", "bundle metadata\n".getBytes(StandardCharsets.UTF_8),
+                "extras/inside.zip", createZipBytes(Map.of(
+                        "nested/info.txt", "ok\n".getBytes(StandardCharsets.UTF_8)
+                ))
+        ));
+
+        assertEquals(List.of("ItemsAdder"), service.listInstallablePackages("malformed-central-directory"));
+        List<Map<?, ?>> cachedEntries = YamlConfiguration.loadConfiguration(archiveCompatibilityCache.toFile())
+                .getMapList("entries");
+        assertEquals(1, cachedEntries.size());
+        assertEquals(bundleZip.toAbsolutePath().normalize().toString(), String.valueOf(cachedEntries.get(0).get("path")));
+        assertNotNull(cachedEntries.get(0).get("size"));
+        assertNotNull(cachedEntries.get(0).get("lastModified"));
+
+        BundleService restartedService = new BundleService(TestUtils.mockPlugin(serverRoot));
+        restartedService.initialize();
+        assertEquals(List.of("ItemsAdder"), restartedService.listInstallablePackages("malformed-central-directory"));
+
+        var results = restartedService.installBundle("malformed-central-directory", "ItemsAdder");
+
+        assertEquals(1, results.size());
+        assertTrue(Files.exists(serverRoot.resolve(
+                "plugins/ItemsAdder/contents/malformed_pack/configs/example.yml"
+        )));
+        assertTrue(YamlConfiguration.loadConfiguration(itemsAdderConfig.toFile())
+                .getStringList("contents-folders-priorities")
+                .contains("malformed_pack"));
+    }
+
+    private void createMalformedCentralDirectoryZip(Path zipPath, Map<String, byte[]> entries) throws IOException {
+        Files.createDirectories(zipPath.getParent());
+        byte[] zipBytes = createZipBytes(entries);
+        corruptFirstCentralDirectoryHeader(zipBytes);
+        Files.write(zipPath, zipBytes);
+    }
+
+    private byte[] createZipBytes(Map<String, byte[]> entries) throws IOException {
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+        try (ZipOutputStream zipOutputStream = new ZipOutputStream(outputStream)) {
+            for (Map.Entry<String, byte[]> entry : entries.entrySet()) {
+                zipOutputStream.putNextEntry(new ZipEntry(entry.getKey()));
+                zipOutputStream.write(entry.getValue());
+                zipOutputStream.closeEntry();
+            }
+        }
+        return outputStream.toByteArray();
+    }
+
+    private void corruptFirstCentralDirectoryHeader(byte[] zipBytes) {
+        byte[] centralDirectorySignature = new byte[]{0x50, 0x4b, 0x01, 0x02};
+        for (int index = 0; index <= zipBytes.length - centralDirectorySignature.length; index++) {
+            boolean matches = true;
+            for (int signatureIndex = 0; signatureIndex < centralDirectorySignature.length; signatureIndex++) {
+                if (zipBytes[index + signatureIndex] != centralDirectorySignature[signatureIndex]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                zipBytes[index + 28] = (byte) 0xff;
+                zipBytes[index + 29] = (byte) 0x7f;
+                return;
+            }
+        }
+
+        throw new IllegalStateException("Central directory header not found.");
     }
 
     private YamlConfiguration deluxeYamlAfter(Path configPath) {

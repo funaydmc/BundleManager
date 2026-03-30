@@ -19,17 +19,22 @@ final class BundleStateStore {
     private final File preferenceDirectory;
     private final File conflictDirectory;
     private final File bundleIndexFile;
+    private final File archiveCompatibilityFile;
+    private Map<String, ArchiveOpenPreference> archiveOpenPreferences;
 
     BundleStateStore(
             File packageDirectory,
             File preferenceDirectory,
             File conflictDirectory,
-            File bundleIndexFile
+            File bundleIndexFile,
+            File archiveCompatibilityFile
     ) {
         this.packageDirectory = packageDirectory;
         this.preferenceDirectory = preferenceDirectory;
         this.conflictDirectory = conflictDirectory;
         this.bundleIndexFile = bundleIndexFile;
+        this.archiveCompatibilityFile = archiveCompatibilityFile;
+        this.archiveOpenPreferences = null;
     }
 
     List<BundleRecord> listInstalledPackageRecords(Logger logger) {
@@ -277,6 +282,31 @@ final class BundleStateStore {
         return allocateBundleId(source.getName(), logger);
     }
 
+    boolean shouldPreferStreamingZip(File sourceFile) {
+        ArchiveOpenPreference preference = loadArchiveOpenPreferences().get(pathKey(sourceFile));
+        return preference != null && preference.matches(sourceFile);
+    }
+
+    void rememberStreamingZip(File sourceFile) throws BundleException {
+        Map<String, ArchiveOpenPreference> preferences = loadArchiveOpenPreferences();
+        String pathKey = pathKey(sourceFile);
+        ArchiveOpenPreference updated = ArchiveOpenPreference.forFile(sourceFile);
+        ArchiveOpenPreference existing = preferences.get(pathKey);
+        if (updated.equals(existing)) {
+            return;
+        }
+
+        preferences.put(pathKey, updated);
+        saveArchiveOpenPreferences(preferences);
+    }
+
+    void clearArchiveOpenPreference(File sourceFile) throws BundleException {
+        Map<String, ArchiveOpenPreference> preferences = loadArchiveOpenPreferences();
+        if (preferences.remove(pathKey(sourceFile)) != null) {
+            saveArchiveOpenPreferences(preferences);
+        }
+    }
+
     private Map<String, String> readSelectedPackages(YamlConfiguration configuration) {
         LinkedHashMap<String, String> selectedPackages = new LinkedHashMap<>();
         ConfigurationSection selectionSection = configuration.getConfigurationSection("selectedPackages");
@@ -387,6 +417,44 @@ final class BundleStateStore {
         return sourceName.trim().toLowerCase(Locale.ROOT).replace('.', '_');
     }
 
+    private Map<String, ArchiveOpenPreference> loadArchiveOpenPreferences() {
+        if (archiveOpenPreferences != null) {
+            return archiveOpenPreferences;
+        }
+
+        LinkedHashMap<String, ArchiveOpenPreference> preferences = new LinkedHashMap<>();
+        if (archiveCompatibilityFile.exists()) {
+            YamlConfiguration configuration = YamlConfiguration.loadConfiguration(archiveCompatibilityFile);
+            for (Map<?, ?> raw : configuration.getMapList("entries")) {
+                ArchiveOpenPreference preference = ArchiveOpenPreference.fromMap(raw);
+                if (preference != null) {
+                    preferences.put(preference.pathKey(), preference);
+                }
+            }
+        }
+
+        archiveOpenPreferences = preferences;
+        return archiveOpenPreferences;
+    }
+
+    private void saveArchiveOpenPreferences(Map<String, ArchiveOpenPreference> preferences) throws BundleException {
+        YamlConfiguration configuration = new YamlConfiguration();
+        List<Map<String, Object>> serialized = new ArrayList<>(preferences.size());
+        for (ArchiveOpenPreference preference : preferences.values()) {
+            serialized.add(preference.toMap());
+        }
+        configuration.set("entries", serialized);
+        try {
+            configuration.save(archiveCompatibilityFile);
+        } catch (IOException ex) {
+            throw new BundleException("Failed to save archive compatibility cache.", ex);
+        }
+    }
+
+    private String pathKey(File sourceFile) {
+        return sourceFile.getAbsoluteFile().toPath().normalize().toString().toLowerCase(Locale.ROOT);
+    }
+
     private String requireString(YamlConfiguration config, String path, File sourceFile) throws BundleException {
         String value = config.getString(path);
         if (value == null || value.isBlank()) {
@@ -419,6 +487,64 @@ final class BundleStateStore {
             configuration.save(getConflictFile(conflict.getId()));
         } catch (IOException ex) {
             throw new BundleException("Failed to save overwrite conflict " + conflict.getId() + ".", ex);
+        }
+    }
+
+    private record ArchiveOpenPreference(String path, long size, long lastModified) {
+
+        static ArchiveOpenPreference forFile(File sourceFile) {
+            File absoluteFile = sourceFile.getAbsoluteFile();
+            return new ArchiveOpenPreference(
+                    absoluteFile.toPath().normalize().toString(),
+                    absoluteFile.length(),
+                    absoluteFile.lastModified()
+            );
+        }
+
+        static ArchiveOpenPreference fromMap(Map<?, ?> raw) {
+            Object path = raw.get("path");
+            if (path == null || String.valueOf(path).isBlank()) {
+                return null;
+            }
+
+            return new ArchiveOpenPreference(
+                    String.valueOf(path),
+                    longValue(raw.get("size")),
+                    longValue(raw.get("lastModified"))
+            );
+        }
+
+        boolean matches(File sourceFile) {
+            File absoluteFile = sourceFile.getAbsoluteFile();
+            return path.equals(absoluteFile.toPath().normalize().toString())
+                    && size == absoluteFile.length()
+                    && lastModified == absoluteFile.lastModified();
+        }
+
+        String pathKey() {
+            return path.toLowerCase(Locale.ROOT);
+        }
+
+        Map<String, Object> toMap() {
+            LinkedHashMap<String, Object> values = new LinkedHashMap<>();
+            values.put("path", path);
+            values.put("size", size);
+            values.put("lastModified", lastModified);
+            return values;
+        }
+
+        private static long longValue(Object value) {
+            if (value instanceof Number number) {
+                return number.longValue();
+            }
+            if (value == null) {
+                return 0L;
+            }
+            try {
+                return Long.parseLong(String.valueOf(value));
+            } catch (NumberFormatException ignored) {
+                return 0L;
+            }
         }
     }
 }
