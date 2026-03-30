@@ -15,6 +15,11 @@ public final class ModelEngineInstaller extends AbstractDirectoryInstaller {
     }
 
     @Override
+    public boolean canRequestOverwrite(ResolvedBundleFile bundleFile) {
+        return true;
+    }
+
+    @Override
     protected boolean shouldInstallPath(List<String> sourceSegments) {
         // ModelEngine trong bundle thato thuc te nam duoi blueprints/**.
         return sourceSegments.size() >= 2

@@ -14,8 +14,10 @@ import tk.funayd.bundleManager.installer.itemsadder.ItemsAdderInstaller;
 import tk.funayd.bundleManager.installer.mcpets.MCPetsInstaller;
 import tk.funayd.bundleManager.installer.mmoitems.MMOItemsInstaller;
 import tk.funayd.bundleManager.installer.modelengine.ModelEngineInstaller;
+import tk.funayd.bundleManager.installer.nexo.NexoInstaller;
 import tk.funayd.bundleManager.installer.mythiclib.MythicLibInstaller;
 import tk.funayd.bundleManager.installer.mythicmobs.MythicMobsInstaller;
+import tk.funayd.bundleManager.installer.oraxen.OraxenInstaller;
 import tk.funayd.bundleManager.installer.resourcepack.ResourcePackInstaller;
 
 import java.io.File;
@@ -46,6 +48,7 @@ public final class BundleService {
     private final File dataDirectory;
     private final File packageDirectory;
     private final File preferenceDirectory;
+    private final File conflictDirectory;
     private final File backupDirectory;
     private final File bundleIndexFile;
     private final Path serverRoot;
@@ -63,6 +66,8 @@ public final class BundleService {
                 new MMOItemsInstaller(),
                 new ModelEngineInstaller(),
                 new MCPetsInstaller(),
+                new OraxenInstaller(),
+                new NexoInstaller(),
                 new ItemsAdderInstaller(),
                 new DeluxeMenusInstaller()
         ));
@@ -70,10 +75,11 @@ public final class BundleService {
         this.dataDirectory = new File(plugin.getDataFolder(), "data");
         this.packageDirectory = new File(dataDirectory, "packages");
         this.preferenceDirectory = new File(dataDirectory, "preferences");
+        this.conflictDirectory = new File(dataDirectory, "conflicts");
         this.backupDirectory = new File(dataDirectory, "backups");
         this.bundleIndexFile = new File(dataDirectory, "bundle-index.yml");
         this.archiveInspector = new BundleArchiveInspector(installerRegistry);
-        this.stateStore = new BundleStateStore(packageDirectory, preferenceDirectory, bundleIndexFile);
+        this.stateStore = new BundleStateStore(packageDirectory, preferenceDirectory, conflictDirectory, bundleIndexFile);
         this.failedPackageMessages = new LinkedHashMap<>();
         this.pendingVariantOptions = List.of();
         this.pendingVariantMessages = List.of();
@@ -87,6 +93,7 @@ public final class BundleService {
         createDirectory(dataDirectory.toPath());
         createDirectory(packageDirectory.toPath());
         createDirectory(preferenceDirectory.toPath());
+        createDirectory(conflictDirectory.toPath());
         createDirectory(backupDirectory.toPath());
     }
 
@@ -156,6 +163,56 @@ public final class BundleService {
         } catch (BundleException ex) {
             return List.of();
         }
+    }
+
+    public List<BundleOverwriteConflict> listOverwriteConflicts() {
+        return stateStore.listOverwriteConflicts();
+    }
+
+    public List<String> listOverwriteConflictIds() {
+        ArrayList<String> ids = new ArrayList<>();
+        for (BundleOverwriteConflict conflict : listOverwriteConflicts()) {
+            ids.add(conflict.getId());
+        }
+        return ids;
+    }
+
+    public BundleActionReport resolveOverwriteConflict(String conflictId, boolean overwrite) throws BundleException {
+        BundleOverwriteConflict conflict = stateStore.loadOverwriteConflict(conflictId);
+        if (!overwrite) {
+            stateStore.deleteOverwriteConflict(conflictId);
+            disableBundleById(conflict.getBundleId(), conflict.getPackageKey());
+            return new BundleActionReport(
+                    conflict.getBundleId(),
+                    conflict.getSourceZipName(),
+                    List.of(),
+                    List.of(),
+                    List.of(conflict.getPackageKey()),
+                    List.of("Skipped overwrite conflict " + conflictId + " and disabled package " + conflict.getPackageKey() + ".")
+            );
+        }
+
+        List<BundleInstallResult> results = installBundle(
+                conflict.getSourceZipName(),
+                conflict.getPackageKey(),
+                new LinkedHashSet<>(conflict.getTargetPaths())
+        );
+        stateStore.deleteOverwriteConflict(conflictId);
+        ArrayList<String> warnings = new ArrayList<>();
+        ArrayList<String> succeededPackages = new ArrayList<>();
+        for (BundleInstallResult result : results) {
+            succeededPackages.add(result.getRecord().getPackageKey());
+            warnings.addAll(result.getWarnings());
+        }
+        warnings.add("Resolved overwrite conflict " + conflictId + " with overwrite approval.");
+        return new BundleActionReport(
+                conflict.getBundleId(),
+                conflict.getSourceZipName(),
+                succeededPackages,
+                List.of(),
+                List.of(),
+                deduplicatePackages(warnings)
+        );
     }
 
     public BundleLoadReport autoLoadBundles() {
@@ -494,6 +551,14 @@ public final class BundleService {
     }
 
     public List<BundleInstallResult> installBundle(String archiveFileName, String requestedPackageKey) throws BundleException {
+        return installBundle(archiveFileName, requestedPackageKey, Set.of());
+    }
+
+    private List<BundleInstallResult> installBundle(
+            String archiveFileName,
+            String requestedPackageKey,
+            Set<String> approvedOverwriteTargets
+    ) throws BundleException {
         File archiveFile = resolveBundleArchiveFile(archiveFileName);
         String bundleId = stateStore.computeBundleId(archiveFile, plugin.getLogger());
         String bundleIdShort = shortId(bundleId);
@@ -523,7 +588,14 @@ public final class BundleService {
 
             ArrayList<BundleInstallResult> results = new ArrayList<>(installablePackages.size());
             for (BundlePackageDescriptor packageDescriptor : installablePackages) {
-                results.add(installPackage(archive, archiveFile.getName(), bundleId, bundleIdShort, packageDescriptor));
+                results.add(installPackage(
+                        archive,
+                        archiveFile.getName(),
+                        bundleId,
+                        bundleIdShort,
+                        packageDescriptor,
+                        approvedOverwriteTargets
+                ));
             }
 
             if (results.isEmpty()) {
@@ -577,7 +649,8 @@ public final class BundleService {
             String sourceZipName,
             String bundleId,
             String bundleIdShort,
-            BundlePackageDescriptor packageDescriptor
+            BundlePackageDescriptor packageDescriptor,
+            Set<String> approvedOverwriteTargets
     ) throws BundleException {
         SupportedPluginInstaller installer = installerRegistry.find(packageDescriptor.pluginKey())
                 .orElseThrow(() -> new BundleException("Unsupported package: " + packageDescriptor.packageKey()));
@@ -607,7 +680,21 @@ public final class BundleService {
                 throw new BundleException("Package '" + packageKey + "' does not contain any installable files.");
             }
 
-            validateNoExistingTargets(packageKey, plannedFiles);
+            applyRenameOnConflictIfAllowed(
+                    installer,
+                    installPrefix,
+                    packageKey,
+                    approvedOverwriteTargets,
+                    plannedFiles
+            );
+            queueOverwriteConflictsIfNeeded(
+                    bundleId,
+                    sourceZipName,
+                    packageKey,
+                    installer,
+                    plannedFiles,
+                    approvedOverwriteTargets
+            );
             warnings.addAll(validateIdentityConflicts(archive, installer, packageKey, plannedFiles));
 
             ReferenceRewriteContext rewriteContext = new ReferenceRewriteContext(plannedFiles);
@@ -617,6 +704,7 @@ public final class BundleService {
                     packageKey,
                     installer,
                     bundleId,
+                    approvedOverwriteTargets,
                     createdDirectories,
                     installedFiles,
                     rewriteContext
@@ -638,6 +726,7 @@ public final class BundleService {
                     new ArrayList<>(createdDirectories)
             );
             stateStore.saveRecord(record);
+            stateStore.deleteOverwriteConflict(bundleId, packageKey);
             return new BundleInstallResult(record, warnings);
         } catch (IOException ex) {
             safeRollbackConfigMutations(appliedMutations);
@@ -678,6 +767,49 @@ public final class BundleService {
                 installer.collectExistingIdentities(serverRoot)
         ));
         return deduplicatePackages(warnings);
+    }
+
+    private void queueOverwriteConflictsIfNeeded(
+            String bundleId,
+            String sourceZipName,
+            String packageKey,
+            SupportedPluginInstaller installer,
+            List<ResolvedBundleFile> plannedFiles,
+            Set<String> approvedOverwriteTargets
+    ) throws BundleException {
+        ArrayList<String> queuedTargets = new ArrayList<>();
+        for (ResolvedBundleFile plannedFile : plannedFiles) {
+            String targetRelativePath = PathUtils.normalizeRelativePath(plannedFile.getTargetRelativePath());
+            Path targetPath = resolveServerPath(targetRelativePath);
+            if (!Files.exists(targetPath)) {
+                continue;
+            }
+            if (containsPathIgnoreCase(approvedOverwriteTargets, targetRelativePath)) {
+                continue;
+            }
+            if (!installer.canRequestOverwrite(plannedFile)) {
+                throw new BundleException(
+                        "Refusing to overwrite existing file for package '" + packageKey + "': " + targetRelativePath
+                );
+            }
+            queuedTargets.add(targetRelativePath);
+        }
+
+        if (queuedTargets.isEmpty()) {
+            return;
+        }
+
+        BundleOverwriteConflict conflict = stateStore.saveOrUpdateOverwriteConflict(
+                bundleId,
+                sourceZipName,
+                packageKey,
+                deduplicatePackages(queuedTargets)
+        );
+        throw new BundleException(
+                "Overwrite conflict queued as #" + conflict.getId()
+                        + " for package '" + packageKey
+                        + "'. Use /bm conflicts and /bm resolve " + conflict.getId() + " overwrite."
+        );
     }
 
     private List<String> ensureNoInternalIdentityConflicts(
@@ -790,6 +922,7 @@ public final class BundleService {
             String packageKey,
             SupportedPluginInstaller installer,
             String bundleId,
+            Set<String> approvedOverwriteTargets,
             LinkedHashSet<String> createdDirectories,
             List<BundleRecord.InstalledFile> installedFiles,
             ReferenceRewriteContext rewriteContext
@@ -798,8 +931,18 @@ public final class BundleService {
             String targetRelativePath = PathUtils.normalizeRelativePath(plannedFile.getTargetRelativePath());
             Path targetPath = resolveServerPath(targetRelativePath);
 
-            // Install moi chi duoc phep them file moi, khong ghi de file san co.
             ensureParentDirectories(targetPath.getParent(), createdDirectories);
+            boolean overwriteApproved = containsPathIgnoreCase(approvedOverwriteTargets, targetRelativePath);
+            String backupPath = "";
+            if (Files.exists(targetPath)) {
+                if (!overwriteApproved) {
+                    throw new BundleException("Overwrite approval is missing for " + targetRelativePath + ".");
+                }
+                backupPath = PathUtils.normalizeRelativePath(recordId(bundleId, packageKey) + "/" + targetRelativePath);
+                Path backupTarget = backupDirectory.toPath().resolve(backupPath).normalize();
+                createDirectory(backupTarget.getParent());
+                Files.copy(targetPath, backupTarget, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+            }
 
             BundleArchiveEntry archiveEntry = new BundleArchiveEntry(plannedFile.getSourceEntryName(), false);
 
@@ -808,10 +951,18 @@ public final class BundleService {
                 try (InputStream inputStream = archive.openInputStream(archiveEntry)) {
                     rewrittenBytes = installer.rewriteFileContent(plannedFile, inputStream.readAllBytes(), rewriteContext);
                 }
-                Files.write(targetPath, rewrittenBytes, StandardOpenOption.CREATE_NEW);
+                if (overwriteApproved) {
+                    Files.write(targetPath, rewrittenBytes, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+                } else {
+                    Files.write(targetPath, rewrittenBytes, StandardOpenOption.CREATE_NEW);
+                }
             } else {
                 try (InputStream inputStream = archive.openInputStream(archiveEntry)) {
-                    Files.copy(inputStream, targetPath);
+                    if (overwriteApproved) {
+                        Files.copy(inputStream, targetPath, StandardCopyOption.REPLACE_EXISTING);
+                    } else {
+                        Files.copy(inputStream, targetPath);
+                    }
                 }
             }
 
@@ -819,24 +970,49 @@ public final class BundleService {
                     plannedFile.getSourceEntryName(),
                     packageKey,
                     targetRelativePath,
-                    ""
+                    backupPath
             ));
         }
     }
 
-    private void validateNoExistingTargets(
+    private void applyRenameOnConflictIfAllowed(
+            SupportedPluginInstaller installer,
+            String installPrefix,
             String packageKey,
+            Set<String> approvedOverwriteTargets,
             List<ResolvedBundleFile> plannedFiles
     ) throws BundleException {
+        ArrayList<ResolvedBundleFile> adjustedFiles = new ArrayList<>(plannedFiles.size());
+        LinkedHashSet<String> touchedTargets = new LinkedHashSet<>();
         for (ResolvedBundleFile plannedFile : plannedFiles) {
-            String targetRelativePath = PathUtils.normalizeRelativePath(plannedFile.getTargetRelativePath());
-            Path targetPath = resolveServerPath(targetRelativePath);
-            if (Files.exists(targetPath)) {
+            String originalTargetPath = PathUtils.normalizeRelativePath(plannedFile.getTargetRelativePath());
+            ResolvedBundleFile resolvedFile = plannedFile.withTargetRelativePath(originalTargetPath);
+
+            if (!containsPathIgnoreCase(approvedOverwriteTargets, originalTargetPath)
+                    && Files.exists(resolveServerPath(originalTargetPath))) {
+                Optional<ResolvedBundleFile> renamedFile = installer.resolveRenameOnConflict(resolvedFile, installPrefix);
+                if (renamedFile.isPresent()) {
+                    String renamedTargetPath = PathUtils.normalizeRelativePath(renamedFile.get().getTargetRelativePath());
+                    resolvedFile = new ResolvedBundleFile(
+                            plannedFile.getSourceEntryName(),
+                            renamedFile.get().getSourceRelativePath(),
+                            renamedTargetPath
+                    );
+                }
+            }
+
+            String targetKey = resolvedFile.getTargetRelativePath().toLowerCase(Locale.ROOT);
+            if (!touchedTargets.add(targetKey)) {
                 throw new BundleException(
-                        "Refusing to overwrite existing file for package '" + packageKey + "': " + targetRelativePath
+                        "Package '" + packageKey + "' contains duplicate target path: "
+                                + resolvedFile.getTargetRelativePath()
                 );
             }
+            adjustedFiles.add(resolvedFile);
         }
+
+        plannedFiles.clear();
+        plannedFiles.addAll(adjustedFiles);
     }
 
     private List<BundlePackageDescriptor> resolveRequestedPackages(
@@ -957,7 +1133,12 @@ public final class BundleService {
                     List.of(),
                     List.of(),
                     descriptor.installablePackages(),
-                    hashChanged ? List.of("Bundle content changed. Stored SHA-1 was updated for disabled bundle.") : List.of()
+                    hashChanged
+                            ? List.of(formatBundleScopedMessage(
+                            descriptor,
+                            "Bundle content changed. Stored SHA-1 was updated for disabled bundle."
+                    ))
+                            : List.of()
             );
         }
 
@@ -975,15 +1156,15 @@ public final class BundleService {
                     List.of(),
                     List.of(),
                     List.of(),
-                    selectionDecision.messages()
+                    contextualizeBundleMessages(descriptor, selectionDecision.messages())
             );
         }
 
         uninstallConflictingVariantPackages(descriptor, selectionDecision.targetPackages());
         BundleActionReport report = installEnabledPackages(descriptor, selectionDecision.targetPackages(), preference, false);
-        ArrayList<String> messages = new ArrayList<>(selectionDecision.messages());
+        ArrayList<String> messages = new ArrayList<>(contextualizeBundleMessages(descriptor, selectionDecision.messages()));
         if (hashChanged) {
-            messages.add("Bundle content changed. Reinstalled from updated source.");
+            messages.add(formatBundleScopedMessage(descriptor, "Bundle content changed. Reinstalled from updated source."));
         }
         messages.addAll(report.getMessages());
         return new BundleActionReport(
@@ -1053,14 +1234,16 @@ public final class BundleService {
             try {
                 List<BundleInstallResult> results = installBundle(descriptor.sourceZipName(), installablePackage);
                 for (BundleInstallResult result : results) {
-                    messages.addAll(result.getWarnings());
+                    for (String warning : result.getWarnings()) {
+                        messages.add(formatPackageScopedMessage(descriptor, installablePackage, warning));
+                    }
                 }
                 clearPackageFailure(descriptor.bundleId(), installablePackage);
                 succeededPackages.add(installablePackage);
             } catch (BundleException ex) {
                 recordBundleFailure(descriptor.bundleId(), installablePackage, ex.getMessage());
                 failedPackages.add(installablePackage);
-                messages.add(ex.getMessage());
+                messages.add(formatPackageScopedMessage(descriptor, installablePackage, ex.getMessage()));
             }
         }
 
@@ -1320,6 +1503,45 @@ public final class BundleService {
             }
         }
         return basePluginKey(packageKey);
+    }
+
+    private String formatBundleScopedMessage(BundleArchiveDescriptor descriptor, String message) {
+        if (descriptor == null) {
+            return message;
+        }
+        return "[" + descriptor.sourceZipName() + "] " + message;
+    }
+
+    private List<String> contextualizeBundleMessages(BundleArchiveDescriptor descriptor, List<String> messages) {
+        ArrayList<String> contextualized = new ArrayList<>(messages.size());
+        for (String message : messages) {
+            contextualized.add(formatBundleScopedMessage(descriptor, message));
+        }
+        return contextualized;
+    }
+
+    private String formatPackageScopedMessage(
+            BundleArchiveDescriptor descriptor,
+            String packageKey,
+            String message
+    ) {
+        StringBuilder builder = new StringBuilder();
+        if (descriptor != null) {
+            builder.append('[').append(descriptor.sourceZipName());
+            if (shouldShowPackageContext(descriptor, packageKey)) {
+                builder.append(" | ").append(displayPackageName(descriptor, packageKey));
+            }
+            builder.append("] ");
+        }
+        builder.append(message);
+        return builder.toString();
+    }
+
+    private boolean shouldShowPackageContext(BundleArchiveDescriptor descriptor, String packageKey) {
+        if (descriptor == null || packageKey == null || packageKey.isBlank()) {
+            return false;
+        }
+        return descriptor.installablePackages().size() > 1 || packageKey.contains("@");
     }
 
     private String basePluginKey(String packageKey) {
@@ -1638,6 +1860,15 @@ public final class BundleService {
     }
 
     private boolean containsIgnoreCase(List<String> values, String target) {
+        for (String value : values) {
+            if (value.equalsIgnoreCase(target)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean containsPathIgnoreCase(Collection<String> values, String target) {
         for (String value : values) {
             if (value.equalsIgnoreCase(target)) {
                 return true;

@@ -114,9 +114,8 @@ public final class MythicMobsInstaller extends AbstractPluginInstaller {
             return Optional.of(new ResolvedBundleFile(relativePath, pluginPath(relativePath)));
         }
 
-        // Giu nguyen id mob/skill trong file, chi doi ten file yaml de tranh trung bundle.
-        String targetRelativePath = replaceFileName(relativePath, prefixFileName(fileName(relativePath), bundleIdShort));
-        return Optional.of(new ResolvedBundleFile(relativePath, pluginPath(targetRelativePath)));
+        // MythicMobs co truong hop filename dong vai tro id, vi vay mac dinh giu nguyen ten file.
+        return Optional.of(new ResolvedBundleFile(relativePath, pluginPath(relativePath)));
     }
 
     @Override

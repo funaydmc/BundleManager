@@ -26,12 +26,6 @@ public final class MMOItemsInstaller extends AbstractDirectoryInstaller {
     }
 
     @Override
-    protected boolean shouldPrefixLeafFile(List<String> sourceSegments) {
-        // Giu nguyen id item/skill trong file, chi doi ten file de tranh trung path.
-        return isYamlFileName(sourceSegments.get(sourceSegments.size() - 1));
-    }
-
-    @Override
     public List<BundleRecord.ConfigMutation> buildConfigMutations(List<ResolvedBundleFile> installedFiles, String bundleIdShort) {
         return noMutations();
     }

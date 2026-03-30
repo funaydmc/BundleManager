@@ -14,6 +14,19 @@ public interface SupportedPluginInstaller {
     // Installer chi duoc map file bundle sang file moi se duoc tao them.
     Optional<ResolvedBundleFile> resolveFile(String relativePath, String bundleIdShort) throws BundleException;
 
+    // Neu tra ve true, overwrite se khong xay ra ngay ma duoc dua vao hang cho conflict.
+    default boolean canRequestOverwrite(ResolvedBundleFile bundleFile) {
+        return false;
+    }
+
+    // Chi duoc doi ten khi file dich da ton tai va installer xac nhan thao tac nay an toan.
+    default Optional<ResolvedBundleFile> resolveRenameOnConflict(
+            ResolvedBundleFile bundleFile,
+            String bundleIdShort
+    ) throws BundleException {
+        return Optional.empty();
+    }
+
     default boolean shouldRewriteFileContent(ResolvedBundleFile bundleFile) {
         return false;
     }

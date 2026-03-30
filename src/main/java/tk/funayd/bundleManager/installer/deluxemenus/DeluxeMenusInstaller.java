@@ -48,11 +48,19 @@ public final class DeluxeMenusInstaller extends AbstractPluginInstaller {
             return Optional.empty();
         }
 
-        menuSegments.set(menuSegments.size() - 1, prefixFileName(originalFileName, bundleIdShort));
         return Optional.of(new ResolvedBundleFile(
                 relativePath,
                 pluginPath(GUI_MENUS_DIRECTORY + "/" + String.join("/", menuSegments))
         ));
+    }
+
+    @Override
+    public Optional<ResolvedBundleFile> resolveRenameOnConflict(
+            ResolvedBundleFile bundleFile,
+            String bundleIdShort
+    ) throws BundleException {
+        // DeluxeMenus dang ky menu qua gui_menus.<id>.file, nen file menu co the doi ten neu bi trung path.
+        return Optional.of(renameTargetFileOnConflict(bundleFile, bundleIdShort));
     }
 
     @Override

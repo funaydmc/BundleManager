@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 
 public final class MCPetsInstaller extends AbstractDirectoryInstaller {
 
@@ -28,14 +29,17 @@ public final class MCPetsInstaller extends AbstractDirectoryInstaller {
     }
 
     @Override
-    protected boolean shouldPrefixLeafFile(List<String> sourceSegments) {
-        // Id pet nam trong truong Id:, khong duoc doi.
-        return isYamlFileName(sourceSegments.get(sourceSegments.size() - 1));
+    public List<BundleRecord.ConfigMutation> buildConfigMutations(List<ResolvedBundleFile> installedFiles, String bundleIdShort) {
+        return noMutations();
     }
 
     @Override
-    public List<BundleRecord.ConfigMutation> buildConfigMutations(List<ResolvedBundleFile> installedFiles, String bundleIdShort) {
-        return noMutations();
+    public Optional<ResolvedBundleFile> resolveRenameOnConflict(
+            ResolvedBundleFile bundleFile,
+            String bundleIdShort
+    ) throws BundleException {
+        // MCPets nhan dien pet qua truong Id:, nen file YAML co the doi ten neu can tranh conflict.
+        return Optional.of(renameTargetFileOnConflict(bundleFile, bundleIdShort));
     }
 
     @Override

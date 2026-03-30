@@ -26,12 +26,6 @@ public final class MythicLibInstaller extends AbstractDirectoryInstaller {
     }
 
     @Override
-    protected boolean shouldPrefixLeafFile(List<String> sourceSegments) {
-        // Chi doi ten file vat ly, khong doi id skill ben trong YAML.
-        return isYamlFileName(sourceSegments.get(sourceSegments.size() - 1));
-    }
-
-    @Override
     public List<BundleRecord.ConfigMutation> buildConfigMutations(List<ResolvedBundleFile> installedFiles, String bundleIdShort) {
         return noMutations();
     }

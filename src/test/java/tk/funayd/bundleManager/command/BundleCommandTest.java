@@ -9,6 +9,7 @@ import tk.funayd.bundleManager.bundle.BundleLoadReport;
 import tk.funayd.bundleManager.bundle.BundleOverallState;
 import tk.funayd.bundleManager.bundle.BundlePackageState;
 import tk.funayd.bundleManager.bundle.BundlePackageView;
+import tk.funayd.bundleManager.bundle.BundleOverwriteConflict;
 import tk.funayd.bundleManager.bundle.BundleService;
 import tk.funayd.bundleManager.bundle.BundleStatusView;
 
@@ -30,6 +31,7 @@ class BundleCommandTest {
         when(bundleService.listKnownBundleIds()).thenReturn(List.of("347272", "12ab34"));
         when(bundleService.listKnownPackageKeys("347272")).thenReturn(List.of("ItemsAdder", "MMOItems", "MythicMobs@vanilla"));
         when(bundleService.listPendingVariantIndexes()).thenReturn(List.of("1", "2"));
+        when(bundleService.listOverwriteConflictIds()).thenReturn(List.of("1", "2"));
 
         BundleCommand command = new BundleCommand(bundleService);
         CommandSender sender = allowedSender();
@@ -41,14 +43,18 @@ class BundleCommandTest {
         List<String> variantPackages = command.onTabComplete(sender, mock(Command.class), "bm", new String[]{"enable", "347272", "Mythic"});
         List<String> variantBundleIds = command.onTabComplete(sender, mock(Command.class), "bm", new String[]{"variant", "34"});
         List<String> variantIndexes = command.onTabComplete(sender, mock(Command.class), "bm", new String[]{"chose", "2"});
+        List<String> resolveConflictIds = command.onTabComplete(sender, mock(Command.class), "bm", new String[]{"resolve", "1"});
+        List<String> resolveActions = command.onTabComplete(sender, mock(Command.class), "bm", new String[]{"resolve", "1", "ov"});
 
         assertEquals(List.of("enable"), subCommands);
-        assertEquals(List.of("reload"), reloadCommands);
+        assertEquals(List.of("resolve", "reload"), reloadCommands);
         assertEquals(List.of("347272"), bundleIds);
         assertEquals(List.of("MMOItems"), packages);
         assertEquals(List.of("MythicMobs@vanilla"), variantPackages);
         assertEquals(List.of("347272"), variantBundleIds);
         assertEquals(List.of("2"), variantIndexes);
+        assertEquals(List.of("1"), resolveConflictIds);
+        assertEquals(List.of("overwrite"), resolveActions);
     }
 
     @Test
@@ -153,6 +159,24 @@ class BundleCommandTest {
         verify(sender, atLeastOnce()).sendMessage(messageCaptor.capture());
         assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("Multiple variant detected")));
         assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("--- MythicMobs ---")));
+    }
+
+    @Test
+    void shouldListOverwriteConflicts() {
+        BundleService bundleService = mock(BundleService.class);
+        when(bundleService.listOverwriteConflicts()).thenReturn(List.of(
+                new BundleOverwriteConflict("1", "1", "bundle.zip", "ModelEngine", List.of("plugins/ModelEngine/blueprints/model.yml"), 1L)
+        ));
+
+        BundleCommand command = new BundleCommand(bundleService);
+        CommandSender sender = allowedSender();
+
+        command.onCommand(sender, mock(Command.class), "bm", new String[]{"conflicts"});
+
+        ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+        verify(sender, atLeastOnce()).sendMessage(messageCaptor.capture());
+        assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("Overwrite conflicts:")));
+        assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("ModelEngine")));
     }
 
     @Test

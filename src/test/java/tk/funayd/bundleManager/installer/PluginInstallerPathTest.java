@@ -7,8 +7,10 @@ import tk.funayd.bundleManager.installer.itemsadder.ItemsAdderInstaller;
 import tk.funayd.bundleManager.installer.mcpets.MCPetsInstaller;
 import tk.funayd.bundleManager.installer.mmoitems.MMOItemsInstaller;
 import tk.funayd.bundleManager.installer.modelengine.ModelEngineInstaller;
+import tk.funayd.bundleManager.installer.nexo.NexoInstaller;
 import tk.funayd.bundleManager.installer.mythiclib.MythicLibInstaller;
 import tk.funayd.bundleManager.installer.mythicmobs.MythicMobsInstaller;
+import tk.funayd.bundleManager.installer.oraxen.OraxenInstaller;
 
 import java.util.List;
 
@@ -40,9 +42,9 @@ class PluginInstallerPathTest {
         ResolvedBundleFile asset = installer.resolveFile("assets/textures/icon.png", "abc").orElseThrow();
         ResolvedBundleFile fontImages = installer.resolveFile("font-images.yml", "abc").orElseThrow();
 
-        assertEquals("plugins/MythicMobs/Mobs/abc_Zombie.yml", mob.getTargetRelativePath());
-        assertEquals("plugins/MythicMobs/Skills/abc_fire.yml", skill.getTargetRelativePath());
-        assertEquals("plugins/MythicMobs/Packs/MyPack/Mobs/abc_Zombie.yml", packMob.getTargetRelativePath());
+        assertEquals("plugins/MythicMobs/Mobs/Zombie.yml", mob.getTargetRelativePath());
+        assertEquals("plugins/MythicMobs/Skills/fire.yml", skill.getTargetRelativePath());
+        assertEquals("plugins/MythicMobs/Packs/MyPack/Mobs/Zombie.yml", packMob.getTargetRelativePath());
         assertEquals("plugins/MythicMobs/assets/textures/icon.png", asset.getTargetRelativePath());
         assertEquals("plugins/MythicMobs/font-images.yml", fontImages.getTargetRelativePath());
         assertTrue(installer.resolveFile("Random/Folder/test.yml", "abc").isEmpty());
@@ -50,7 +52,7 @@ class PluginInstallerPathTest {
     }
 
     @Test
-    void modularInstallersShouldOnlyRenamePhysicalFilesWhenSafe() throws Exception {
+    void modularInstallersShouldKeepOriginalPathUntilConflictIsApproved() throws Exception {
         MMOItemsInstaller mmoItemsInstaller = new MMOItemsInstaller();
         MythicLibInstaller mythicLibInstaller = new MythicLibInstaller();
         MCPetsInstaller mcPetsInstaller = new MCPetsInstaller();
@@ -58,16 +60,23 @@ class PluginInstallerPathTest {
         BlueprintsInstaller blueprintsInstaller = new BlueprintsInstaller();
 
         assertEquals(
-                "plugins/MMOItems/item/abc_sword.yml",
+                "plugins/MMOItems/item/sword.yml",
                 mmoItemsInstaller.resolveFile("item/sword.yml", "abc").orElseThrow().getTargetRelativePath()
         );
         assertEquals(
-                "plugins/MythicLib/skill/abc_pack.yml",
+                "plugins/MythicLib/skill/pack.yml",
                 mythicLibInstaller.resolveFile("skill/pack.yml", "abc").orElseThrow().getTargetRelativePath()
         );
         assertEquals(
-                "plugins/MCPets/Pets/MyPack/abc_pet.yml",
+                "plugins/MCPets/Pets/MyPack/pet.yml",
                 mcPetsInstaller.resolveFile("Pets/MyPack/pet.yml", "abc").orElseThrow().getTargetRelativePath()
+        );
+        assertEquals(
+                "plugins/MCPets/Pets/MyPack/abc_pet.yml",
+                mcPetsInstaller.resolveRenameOnConflict(
+                        mcPetsInstaller.resolveFile("Pets/MyPack/pet.yml", "abc").orElseThrow(),
+                        "abc"
+                ).orElseThrow().getTargetRelativePath()
         );
         assertEquals(
                 "plugins/ModelEngine/blueprints/my_model.bbmodel",
@@ -79,5 +88,45 @@ class PluginInstallerPathTest {
         );
         assertTrue(modelEngineInstaller.resolveFile("config.yml", "abc").isEmpty());
         assertTrue(mcPetsInstaller.resolveFile("README.txt", "abc").isEmpty());
+    }
+
+    @Test
+    void oraxenInstallerShouldOnlyAcceptContentDirectories() throws Exception {
+        OraxenInstaller installer = new OraxenInstaller();
+
+        assertEquals(
+                "plugins/Oraxen/items/weapons/swords.yml",
+                installer.resolveFile("items/weapons/swords.yml", "abc").orElseThrow().getTargetRelativePath()
+        );
+        assertEquals(
+                "plugins/Oraxen/pack/textures/items/icon.png",
+                installer.resolveFile("pack/textures/items/icon.png", "abc").orElseThrow().getTargetRelativePath()
+        );
+        assertEquals(
+                "plugins/Oraxen/glyphs/chat.yml",
+                installer.resolveFile("glyphs/chat.yml", "abc").orElseThrow().getTargetRelativePath()
+        );
+        assertTrue(installer.resolveFile("settings.yml", "abc").isEmpty());
+        assertTrue(installer.resolveFile("mechanics/furniture.yml", "abc").isEmpty());
+    }
+
+    @Test
+    void nexoInstallerShouldOnlyAcceptDocumentedContentDirectories() throws Exception {
+        NexoInstaller installer = new NexoInstaller();
+
+        assertEquals(
+                "plugins/Nexo/items/weapons/swords.yml",
+                installer.resolveFile("items/weapons/swords.yml", "abc").orElseThrow().getTargetRelativePath()
+        );
+        assertEquals(
+                "plugins/Nexo/dialogs/vendor.yml",
+                installer.resolveFile("dialogs/vendor.yml", "abc").orElseThrow().getTargetRelativePath()
+        );
+        assertEquals(
+                "plugins/Nexo/pack/external_packs/MyPack/assets/example.json",
+                installer.resolveFile("pack/external_packs/MyPack/assets/example.json", "abc").orElseThrow().getTargetRelativePath()
+        );
+        assertTrue(installer.resolveFile("config.yml", "abc").isEmpty());
+        assertTrue(installer.resolveFile("mechanics/furniture.yml", "abc").isEmpty());
     }
 }

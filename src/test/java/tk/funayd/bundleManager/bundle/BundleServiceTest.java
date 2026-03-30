@@ -60,8 +60,8 @@ class BundleServiceTest {
         assertEquals("DeluxeMenus", record.getPackageKey());
 
         String shortId = record.getBundleShortId();
-        Path mainMenu = serverRoot.resolve("plugins/DeluxeMenus/gui_menus/" + shortId + "_main.yml");
-        Path submenu = serverRoot.resolve("plugins/DeluxeMenus/gui_menus/" + shortId + "_submenu.yml");
+        Path mainMenu = serverRoot.resolve("plugins/DeluxeMenus/gui_menus/main.yml");
+        Path submenu = serverRoot.resolve("plugins/DeluxeMenus/gui_menus/submenu.yml");
         Path itemsAdderFile = serverRoot.resolve("plugins/ItemsAdder/contents/my_pack/configs/example.yml");
 
         assertTrue(Files.exists(mainMenu));
@@ -70,7 +70,7 @@ class BundleServiceTest {
         assertTrue(TestUtils.readString(mainMenu).contains("[openguimenu] submenu"));
 
         YamlConfiguration deluxeYaml = YamlConfiguration.loadConfiguration(deluxeConfig.toFile());
-        assertEquals(shortId + "_main.yml", deluxeYaml.getString("gui_menus.main.file"));
+        assertEquals("main.yml", deluxeYaml.getString("gui_menus.main.file"));
         assertEquals(1, service.listInstalledBundles().size());
         assertEquals(List.of("DeluxeMenus"), service.listInstalledBundles().get(0).getPackageKeys());
 
@@ -132,8 +132,7 @@ class BundleServiceTest {
                 "MythicMobs/Mobs/Zombie.yml", "Type: ZOMBIE\nHealth: 20\n"
         ));
 
-        String shortId = "1";
-        Path targetFile = serverRoot.resolve("plugins/MythicMobs/Mobs/" + shortId + "_Zombie.yml");
+        Path targetFile = serverRoot.resolve("plugins/MythicMobs/Mobs/Zombie.yml");
         Files.createDirectories(targetFile.getParent());
         Files.writeString(targetFile, "Type: ZOMBIE\nHealth: 10\n");
 
@@ -141,6 +140,64 @@ class BundleServiceTest {
         assertTrue(exception.getMessage().contains("Refusing to overwrite existing file"));
         assertEquals("Type: ZOMBIE\nHealth: 10\n", TestUtils.readString(targetFile));
         assertTrue(service.listInstalledBundles().isEmpty());
+    }
+
+    @Test
+    void shouldQueueOverwriteConflictAndRestoreOriginalFileAfterApprovedInstallIsUninstalled() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path targetFile = serverRoot.resolve("plugins/ModelEngine/blueprints/model.yml");
+        Files.createDirectories(targetFile.getParent());
+        Files.writeString(targetFile, "model: old\n");
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/modelengine-conflict.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "ModelEngine/blueprints/model.yml", "model: new\n"
+        ));
+
+        BundleException exception = assertThrows(BundleException.class, () -> service.installBundle("modelengine-conflict", "ModelEngine"));
+        assertTrue(exception.getMessage().contains("Overwrite conflict queued as #1"));
+        assertEquals(1, service.listOverwriteConflicts().size());
+        assertEquals(List.of("plugins/ModelEngine/blueprints/model.yml"), service.listOverwriteConflicts().get(0).getTargetPaths());
+        assertEquals("model: old\n", TestUtils.readString(targetFile));
+
+        BundleActionReport report = service.resolveOverwriteConflict("1", true);
+        assertTrue(report.getSucceededPackages().contains("ModelEngine"));
+        assertEquals("model: new\n", TestUtils.readString(targetFile));
+        assertTrue(service.listOverwriteConflicts().isEmpty());
+
+        service.uninstallBundle("1", "ModelEngine");
+        assertEquals("model: old\n", TestUtils.readString(targetFile));
+    }
+
+    @Test
+    void shouldRenameDeluxeMenusFileOnlyWhenNaturalTargetAlreadyExists() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path deluxeConfig = serverRoot.resolve("plugins/DeluxeMenus/config.yml");
+        Path existingMenu = serverRoot.resolve("plugins/DeluxeMenus/gui_menus/main.yml");
+        Files.createDirectories(existingMenu.getParent());
+        Files.writeString(deluxeConfig, "gui_menus: {}\n");
+        Files.writeString(existingMenu, "menu_title: \"Existing\"\nitems: {}\n");
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/deluxe-conflict.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "DeluxeMenus/main.yml", "menu_title: \"Bundle\"\nitems: {}\n"
+        ));
+
+        List<BundleInstallResult> results = service.installBundle("deluxe-conflict", "DeluxeMenus");
+
+        assertEquals(1, results.size());
+        assertEquals("menu_title: \"Existing\"\nitems: {}\n", TestUtils.readString(existingMenu));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/DeluxeMenus/gui_menus/1_main.yml")));
+        YamlConfiguration deluxeYaml = YamlConfiguration.loadConfiguration(deluxeConfig.toFile());
+        assertEquals("1_main.yml", deluxeYaml.getString("gui_menus.main.file"));
     }
 
     @Test
@@ -186,7 +243,7 @@ class BundleServiceTest {
 
         assertEquals(1, results.size());
         assertTrue(results.get(0).getWarnings().stream().anyMatch(message -> message.contains("menu id 'main'")));
-        assertTrue(Files.exists(serverRoot.resolve("plugins/DeluxeMenus/gui_menus/1_main.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/DeluxeMenus/gui_menus/main.yml")));
         assertEquals(1, service.listInstalledBundles().size());
     }
 
@@ -216,7 +273,7 @@ class BundleServiceTest {
 
         assertEquals(1, results.size());
         assertTrue(results.get(0).getWarnings().stream().anyMatch(message -> message.contains("mob id 'knight'")));
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/1_KnightBundle.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/KnightBundle.yml")));
         assertEquals(1, service.listInstalledBundles().size());
     }
 
@@ -349,6 +406,23 @@ class BundleServiceTest {
     }
 
     @Test
+    void shouldDetectOraxenAndNexoPackages() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/bundle-content-platforms.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "Oraxen/items/weapons.yml", "ruby_sword:\n  material: DIAMOND_SWORD\n",
+                "Nexo/items/weapons.yml", "onyx_sword:\n  material: DIAMOND_SWORD\n",
+                "Nexo/pack/external_packs/MyPack/assets/nexo/item.json", "{}\n"
+        ));
+
+        assertEquals(List.of("Nexo", "Oraxen"), service.listInstallablePackages("bundle-content-platforms"));
+    }
+
+    @Test
     void shouldInstallPackagesFromNestedZipInsideBundleZip() throws Exception {
         Path serverRoot = tempDir.resolve("server");
         JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
@@ -373,7 +447,7 @@ class BundleServiceTest {
 
         List<BundleInstallResult> results = service.installBundle("outer-bundle", "MythicMobs");
         assertEquals(1, results.size());
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/1_Zombie.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/Zombie.yml")));
     }
 
     @Test
@@ -390,13 +464,13 @@ class BundleServiceTest {
 
         BundleLoadReport firstLoad = service.autoLoadBundles();
         assertEquals(1, firstLoad.getInstalledPackageCount());
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/1_Zombie.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/Zombie.yml")));
 
         Files.delete(bundleZip);
 
         BundleLoadReport reload = service.autoLoadBundles();
         assertEquals(0, reload.getInstalledPackageCount());
-        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/1_Zombie.yml")));
+        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/Zombie.yml")));
         assertTrue(service.listInstalledBundles().isEmpty());
         assertTrue(reload.getWarnings().stream().anyMatch(message -> message.contains("no longer exists")));
     }
@@ -415,7 +489,7 @@ class BundleServiceTest {
 
         BundleLoadReport firstLoad = service.autoLoadBundles();
         assertEquals(1, firstLoad.getInstalledPackageCount());
-        assertTrue(TestUtils.readString(serverRoot.resolve("plugins/MythicMobs/Mobs/1_Zombie.yml")).contains("Health: 20"));
+        assertTrue(TestUtils.readString(serverRoot.resolve("plugins/MythicMobs/Mobs/Zombie.yml")).contains("Health: 20"));
 
         TestUtils.createZip(bundleZip, Map.of(
                 "MythicMobs/Mobs/Zombie.yml", "zombie:\n  Type: ZOMBIE\n  Health: 40\n"
@@ -424,10 +498,43 @@ class BundleServiceTest {
         BundleLoadReport reload = service.autoLoadBundles();
         assertEquals(1, reload.getInstalledPackageCount());
         assertEquals(1, reload.getInstalledBundleCount());
-        assertTrue(TestUtils.readString(serverRoot.resolve("plugins/MythicMobs/Mobs/1_Zombie.yml")).contains("Health: 40"));
+        assertTrue(TestUtils.readString(serverRoot.resolve("plugins/MythicMobs/Mobs/Zombie.yml")).contains("Health: 40"));
         assertTrue(reload.getWarnings().stream().anyMatch(message -> message.contains("Reinstalled from updated source")));
         YamlConfiguration preference = YamlConfiguration.loadConfiguration(serverRoot.resolve("plugins/BundleManager/data/preferences/1.yml").toFile());
         assertFalse(preference.getString("sourceSha1", "").isBlank());
+    }
+
+    @Test
+    void shouldIncludeBundleAndPackageContextInAutoLoadWarningsForMultiPackageBundles() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path deluxeConfig = serverRoot.resolve("plugins/DeluxeMenus/config.yml");
+        Path itemsAdderConfig = serverRoot.resolve("plugins/ItemsAdder/config.yml");
+        Files.createDirectories(deluxeConfig.getParent());
+        Files.createDirectories(itemsAdderConfig.getParent());
+        Files.writeString(deluxeConfig, """
+                gui_menus:
+                  main:
+                    file: existing_main.yml
+                """);
+        Files.writeString(itemsAdderConfig, "contents-folders-priorities: []\n");
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/contextual-warning.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "DeluxeMenus/main.yml", "menu_title: \"Main\"\nitems: {}\n",
+                "ItemsAdder/contents/my_pack/configs/example.yml", "enabled: true\n"
+        ));
+
+        BundleLoadReport report = service.autoLoadBundles();
+
+        assertEquals(2, report.getInstalledPackageCount());
+        assertTrue(report.getWarnings().stream().anyMatch(message ->
+                message.contains("[contextual-warning.zip | DeluxeMenus]")
+                        && message.contains("menu id 'main'")
+        ));
     }
 
     @Test
@@ -528,14 +635,13 @@ class BundleServiceTest {
         assertEquals(1, views.size());
         assertTrue(views.get(0).getPackageViews().stream().anyMatch(view -> view.getDisplayName().equals("MythicMobs [2]")));
 
-        String shortId = service.listInstalledBundles().get(0).getBundleShortId();
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/" + shortId + "_model_ModelMob.yml")));
-        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/" + shortId + "_vanilla_VanillaMob.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/ModelMob.yml")));
+        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/VanillaMob.yml")));
 
         BundleActionReport switchReport = service.switchVariant(2);
         assertTrue(switchReport.getSucceededPackages().contains("MythicMobs@vanilla"));
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/" + shortId + "_vanilla_VanillaMob.yml")));
-        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/" + shortId + "_model_ModelMob.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/VanillaMob.yml")));
+        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/ModelMob.yml")));
     }
 
     @Test
@@ -590,9 +696,8 @@ class BundleServiceTest {
         service.switchVariant(5);
         service.autoLoadBundles();
 
-        String shortId = service.listInstalledBundles().get(0).getBundleShortId();
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/" + shortId + "_modded_ModdedMob.yml")));
-        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/" + shortId + "_vanilla_VanillaMob.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/ModdedMob.yml")));
+        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/VanillaMob.yml")));
         assertTrue(Files.exists(serverRoot.resolve("plugins/ModelEngine/blueprints/vanilla_model.yml")));
         assertFalse(Files.exists(serverRoot.resolve("plugins/ModelEngine/blueprints/modded_model.yml")));
     }

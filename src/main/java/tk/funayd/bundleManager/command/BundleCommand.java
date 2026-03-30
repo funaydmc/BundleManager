@@ -10,6 +10,7 @@ import tk.funayd.bundleManager.bundle.BundleLoadReport;
 import tk.funayd.bundleManager.bundle.BundleOverallState;
 import tk.funayd.bundleManager.bundle.BundlePackageState;
 import tk.funayd.bundleManager.bundle.BundlePackageView;
+import tk.funayd.bundleManager.bundle.BundleOverwriteConflict;
 import tk.funayd.bundleManager.bundle.BundleService;
 import tk.funayd.bundleManager.bundle.BundleStatusView;
 
@@ -43,6 +44,8 @@ public final class BundleCommand implements TabExecutor {
                 case "disable" -> disableBundle(sender, label, args);
                 case "variant" -> showVariants(sender, label, args);
                 case "chose" -> switchVariant(sender, label, args);
+                case "conflicts" -> listConflicts(sender);
+                case "resolve" -> resolveConflict(sender, label, args);
                 case "reload" -> reloadBundles(sender);
                 case "list" -> listBundles(sender);
                 case "supported" -> listSupportedPlugins(sender);
@@ -62,7 +65,7 @@ public final class BundleCommand implements TabExecutor {
         }
 
         if (args.length == 1) {
-            return filterByPrefix(List.of("enable", "disable", "variant", "chose", "reload", "list", "supported"), args[0]);
+            return filterByPrefix(List.of("enable", "disable", "variant", "chose", "conflicts", "resolve", "reload", "list", "supported"), args[0]);
         }
 
         if ("enable".equalsIgnoreCase(args[0]) || "disable".equalsIgnoreCase(args[0])) {
@@ -80,6 +83,15 @@ public final class BundleCommand implements TabExecutor {
 
         if ("chose".equalsIgnoreCase(args[0]) && args.length == 2) {
             return filterByPrefix(bundleService.listPendingVariantIndexes(), args[1]);
+        }
+
+        if ("resolve".equalsIgnoreCase(args[0])) {
+            if (args.length == 2) {
+                return filterByPrefix(bundleService.listOverwriteConflictIds(), args[1]);
+            }
+            if (args.length == 3) {
+                return filterByPrefix(List.of("overwrite", "skip"), args[2]);
+            }
         }
 
         return List.of();
@@ -175,6 +187,58 @@ public final class BundleCommand implements TabExecutor {
         }
     }
 
+    private void listConflicts(CommandSender sender) {
+        List<BundleOverwriteConflict> conflicts = bundleService.listOverwriteConflicts();
+        if (conflicts.isEmpty()) {
+            sender.sendMessage(ChatColor.YELLOW + "No overwrite conflicts are waiting.");
+            return;
+        }
+
+        sender.sendMessage(ChatColor.GOLD + "Overwrite conflicts:");
+        for (BundleOverwriteConflict conflict : conflicts) {
+            sender.sendMessage(ChatColor.DARK_GRAY + "- "
+                    + ChatColor.AQUA + conflict.getId()
+                    + ChatColor.DARK_GRAY + " | "
+                    + ChatColor.WHITE + conflict.getSourceZipName()
+                    + ChatColor.GRAY + " | "
+                    + ChatColor.WHITE + conflict.getPackageKey()
+                    + ChatColor.GRAY + " | "
+                    + ChatColor.WHITE + String.join(", ", conflict.getTargetPaths()));
+        }
+    }
+
+    private void resolveConflict(CommandSender sender, String label, String[] args) throws BundleException {
+        if (args.length < 3) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /" + label + " resolve <conflictId> <overwrite|skip>");
+            return;
+        }
+
+        boolean overwrite;
+        if ("overwrite".equalsIgnoreCase(args[2])) {
+            overwrite = true;
+        } else if ("skip".equalsIgnoreCase(args[2])) {
+            overwrite = false;
+        } else {
+            throw new BundleException("Unknown conflict action: " + args[2]);
+        }
+
+        BundleActionReport report = bundleService.resolveOverwriteConflict(args[1], overwrite);
+        sender.sendMessage(ChatColor.GREEN + "Conflict resolved for bundle "
+                + ChatColor.AQUA + report.getBundleShortId()
+                + ChatColor.GRAY + " (" + report.getSourceZipName() + ")");
+        if (!report.getSucceededPackages().isEmpty()) {
+            sender.sendMessage(ChatColor.GRAY + "Affected packages: "
+                    + ChatColor.WHITE + String.join(", ", report.getSucceededPackages()));
+        }
+        if (!report.getDisabledPackages().isEmpty()) {
+            sender.sendMessage(ChatColor.GRAY + "Disabled packages: "
+                    + ChatColor.WHITE + String.join(", ", report.getDisabledPackages()));
+        }
+        for (String message : report.getMessages()) {
+            sender.sendMessage(ChatColor.translateAlternateColorCodes('&', message));
+        }
+    }
+
     private void switchVariant(CommandSender sender, String label, String[] args) throws BundleException {
         if (args.length < 2) {
             sender.sendMessage(ChatColor.YELLOW + "Usage: /" + label + " chose <index>");
@@ -252,6 +316,8 @@ public final class BundleCommand implements TabExecutor {
         sender.sendMessage(ChatColor.GRAY + "/" + label + " disable <bundleId> [package]");
         sender.sendMessage(ChatColor.GRAY + "/" + label + " variant <bundleId>");
         sender.sendMessage(ChatColor.GRAY + "/" + label + " chose <index>");
+        sender.sendMessage(ChatColor.GRAY + "/" + label + " conflicts");
+        sender.sendMessage(ChatColor.GRAY + "/" + label + " resolve <conflictId> <overwrite|skip>");
         sender.sendMessage(ChatColor.GRAY + "/" + label + " reload");
         sender.sendMessage(ChatColor.GRAY + "/" + label + " list");
         sender.sendMessage(ChatColor.GRAY + "/" + label + " supported");

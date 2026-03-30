@@ -17,8 +17,16 @@ class DeluxeMenusInstallerTest {
         ResolvedBundleFile rootFile = installer.resolveFile("main.yml", "abc123").orElseThrow();
         ResolvedBundleFile nestedFile = installer.resolveFile("gui_menus/admin/submenu.yml", "abc123").orElseThrow();
 
-        assertEquals("plugins/DeluxeMenus/gui_menus/abc123_main.yml", rootFile.getTargetRelativePath());
-        assertEquals("plugins/DeluxeMenus/gui_menus/admin/abc123_submenu.yml", nestedFile.getTargetRelativePath());
+        assertEquals("plugins/DeluxeMenus/gui_menus/main.yml", rootFile.getTargetRelativePath());
+        assertEquals("plugins/DeluxeMenus/gui_menus/admin/submenu.yml", nestedFile.getTargetRelativePath());
+    }
+
+    @Test
+    void shouldOnlyRenameMenuFileWhenConflictIsExplicitlyResolved() throws Exception {
+        ResolvedBundleFile original = installer.resolveFile("gui_menus/admin/submenu.yml", "abc123").orElseThrow();
+        ResolvedBundleFile renamed = installer.resolveRenameOnConflict(original, "abc123").orElseThrow();
+
+        assertEquals("plugins/DeluxeMenus/gui_menus/admin/abc123_submenu.yml", renamed.getTargetRelativePath());
     }
 
     @Test

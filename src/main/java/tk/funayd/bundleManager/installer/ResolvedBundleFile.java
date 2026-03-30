@@ -27,4 +27,8 @@ public final class ResolvedBundleFile {
     public String getTargetRelativePath() {
         return targetRelativePath;
     }
+
+    public ResolvedBundleFile withTargetRelativePath(String updatedTargetRelativePath) {
+        return new ResolvedBundleFile(sourceEntryName, sourceRelativePath, updatedTargetRelativePath);
+    }
 }

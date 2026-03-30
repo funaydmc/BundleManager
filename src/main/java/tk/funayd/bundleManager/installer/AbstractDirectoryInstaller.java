@@ -39,10 +39,6 @@ public abstract class AbstractDirectoryInstaller extends AbstractPluginInstaller
         return sourceSegments.size() >= 2;
     }
 
-    protected boolean shouldPrefixLeafFile(List<String> sourceSegments) {
-        return false;
-    }
-
     protected String mapRootDirectoryName(String rootDirectory) {
         return rootDirectory;
     }
@@ -50,10 +46,6 @@ public abstract class AbstractDirectoryInstaller extends AbstractPluginInstaller
     protected List<String> transformTargetSegments(List<String> sourceSegments, String bundleIdShort) {
         ArrayList<String> targetSegments = new ArrayList<>(sourceSegments);
         targetSegments.set(0, mapRootDirectoryName(targetSegments.get(0)));
-        if (shouldPrefixLeafFile(sourceSegments)) {
-            int lastIndex = targetSegments.size() - 1;
-            targetSegments.set(lastIndex, prefixFileName(targetSegments.get(lastIndex), bundleIdShort));
-        }
         return targetSegments;
     }
 }

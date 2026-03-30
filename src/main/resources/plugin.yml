@@ -2,10 +2,22 @@ name: BundleManager
 version: '${version}'
 main: tk.funayd.bundleManager.BundleManager
 api-version: '1.18'
+load: STARTUP
+loadbefore:
+  - Blueprints
+  - MythicMobs
+  - MythicLib
+  - MMOItems
+  - ModelEngine
+  - MCPets
+  - Oraxen
+  - Nexo
+  - ItemsAdder
+  - DeluxeMenus
 commands:
   bundle:
     description: Enable, disable, and list managed bundles
-    usage: /bundle <enable|disable|variant|chose|reload|list|supported>
+    usage: /bundle <enable|disable|variant|chose|conflicts|resolve|reload|list|supported>
     aliases: [bm]
     permission: bundlemanager.admin
 permissions:

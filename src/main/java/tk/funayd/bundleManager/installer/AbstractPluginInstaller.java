@@ -65,6 +65,18 @@ public abstract class AbstractPluginInstaller implements SupportedPluginInstalle
         return PathUtils.normalizeRelativePath(String.join("/", segments));
     }
 
+    protected final ResolvedBundleFile renameTargetFileOnConflict(
+            ResolvedBundleFile bundleFile,
+            String bundleIdShort
+    ) throws BundleException {
+        String targetRelativePath = bundleFile.getTargetRelativePath();
+        String renamedTargetPath = replaceFileName(
+                targetRelativePath,
+                prefixFileName(fileName(targetRelativePath), bundleIdShort)
+        );
+        return bundleFile.withTargetRelativePath(renamedTargetPath);
+    }
+
     protected final BundleRecord.ConfigMutation appendStringListMutation(
             String configPath,
             String targetPath,

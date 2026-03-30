@@ -86,17 +86,15 @@ class ExternalBundleSmokeTest {
 
         List<BundleInstallResult> mmoItemsResults = service.installBundle(lostAssets.getFileName().toString(), "MMOItems");
         assertEquals(1, mmoItemsResults.size());
-        String lostAssetsShortId = mmoItemsResults.get(0).getRecord().getBundleShortId();
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MMOItems/item/" + lostAssetsShortId + "_sword.yml")));
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MMOItems/skill/" + lostAssetsShortId + "_lostassets-revenant-lc.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MMOItems/item/sword.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MMOItems/skill/lostassets-revenant-lc.yml")));
         service.uninstallBundle(lostAssets.getFileName().toString(), "MMOItems");
-        assertFalse(Files.exists(serverRoot.resolve("plugins/MMOItems/item/" + lostAssetsShortId + "_sword.yml")));
+        assertFalse(Files.exists(serverRoot.resolve("plugins/MMOItems/item/sword.yml")));
 
         List<BundleInstallResult> mythicLibResults = service.installBundle(lostAssets.getFileName().toString(), "MythicLib");
         assertEquals(1, mythicLibResults.size());
         assertTrue(Files.exists(serverRoot.resolve(
-                "plugins/MythicLib/skill/" + mythicLibResults.get(0).getRecord().getBundleShortId()
-                        + "_LostAssets_ClassPack_04_Revenant.yml"
+                "plugins/MythicLib/skill/LostAssets_ClassPack_04_Revenant.yml"
         )));
         service.uninstallBundle(lostAssets.getFileName().toString(), "MythicLib");
 
@@ -117,10 +115,9 @@ class ExternalBundleSmokeTest {
 
         List<BundleInstallResult> mcPetsResults = service.installBundle(witches.getFileName().toString(), "MCPets");
         assertEquals(1, mcPetsResults.size());
-        String witchesShortId = mcPetsResults.get(0).getRecord().getBundleShortId();
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MCPets/Pets/Pets_witches/" + witchesShortId + "_Witch_pet_Green.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MCPets/Pets/Pets_witches/Witch_pet_Green.yml")));
         service.uninstallBundle(witches.getFileName().toString(), "MCPets");
-        assertFalse(Files.exists(serverRoot.resolve("plugins/MCPets/Pets/Pets_witches/" + witchesShortId + "_Witch_pet_Green.yml")));
+        assertFalse(Files.exists(serverRoot.resolve("plugins/MCPets/Pets/Pets_witches/Witch_pet_Green.yml")));
 
         List<BundleInstallResult> witchesModelEngineResults = service.installBundle(witches.getFileName().toString(), "ModelEngine");
         assertEquals(1, witchesModelEngineResults.size());
@@ -132,13 +129,12 @@ class ExternalBundleSmokeTest {
         assertEquals(1, mythicResults.size());
         assertTrue(mythicResults.get(0).getRecord().getInstalledFiles().size() >= 2);
 
-        String shortId = mythicResults.get(0).getRecord().getBundleShortId();
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/" + shortId + "_Witch_pets.yml")));
-        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Skills/" + shortId + "_witchespets_skills.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/Witch_pets.yml")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Skills/witchespets_skills.yml")));
 
         service.uninstallBundle(witches.getFileName().toString(), "MythicMobs");
-        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/" + shortId + "_Witch_pets.yml")));
-        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Skills/" + shortId + "_witchespets_skills.yml")));
+        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/Witch_pets.yml")));
+        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Skills/witchespets_skills.yml")));
 
         Path hydra = EXTERNAL_BUNDLES_DIRECTORY.resolve("Umbraeus - The Void Hydra.zip");
         assumeTrue(Files.exists(hydra), "Umbraeus bundle is not available.");

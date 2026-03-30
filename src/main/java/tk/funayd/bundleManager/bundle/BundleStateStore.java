@@ -17,15 +17,18 @@ final class BundleStateStore {
 
     private final File packageDirectory;
     private final File preferenceDirectory;
+    private final File conflictDirectory;
     private final File bundleIndexFile;
 
     BundleStateStore(
             File packageDirectory,
             File preferenceDirectory,
+            File conflictDirectory,
             File bundleIndexFile
     ) {
         this.packageDirectory = packageDirectory;
         this.preferenceDirectory = preferenceDirectory;
+        this.conflictDirectory = conflictDirectory;
         this.bundleIndexFile = bundleIndexFile;
     }
 
@@ -111,6 +114,100 @@ final class BundleStateStore {
             configuration.save(getPreferenceFile(preference.getBundleId()));
         } catch (IOException ex) {
             throw new BundleException("Failed to save bundle preference " + preference.getBundleId() + ".", ex);
+        }
+    }
+
+    List<BundleOverwriteConflict> listOverwriteConflicts() {
+        File[] files = conflictDirectory.listFiles((dir, name) -> name.endsWith(".yml"));
+        if (files == null || files.length == 0) {
+            return List.of();
+        }
+
+        ArrayList<BundleOverwriteConflict> conflicts = new ArrayList<>(files.length);
+        for (File file : files) {
+            YamlConfiguration configuration = YamlConfiguration.loadConfiguration(file);
+            conflicts.add(new BundleOverwriteConflict(
+                    configuration.getString("id", PathUtils.baseName(file.getName())),
+                    configuration.getString("bundleId", ""),
+                    configuration.getString("sourceZipName", ""),
+                    configuration.getString("packageKey", ""),
+                    configuration.getStringList("targetPaths"),
+                    configuration.getLong("createdAtEpochMillis", 0L)
+            ));
+        }
+        conflicts.sort(Comparator.comparingLong(BundleOverwriteConflict::getCreatedAtEpochMillis));
+        return conflicts;
+    }
+
+    BundleOverwriteConflict loadOverwriteConflict(String id) throws BundleException {
+        File file = getConflictFile(id);
+        if (!file.exists()) {
+            throw new BundleException("Conflict not found: " + id);
+        }
+
+        YamlConfiguration configuration = YamlConfiguration.loadConfiguration(file);
+        return new BundleOverwriteConflict(
+                configuration.getString("id", id),
+                configuration.getString("bundleId", ""),
+                configuration.getString("sourceZipName", ""),
+                configuration.getString("packageKey", ""),
+                configuration.getStringList("targetPaths"),
+                configuration.getLong("createdAtEpochMillis", 0L)
+        );
+    }
+
+    BundleOverwriteConflict saveOrUpdateOverwriteConflict(
+            String bundleId,
+            String sourceZipName,
+            String packageKey,
+            List<String> targetPaths
+    ) throws BundleException {
+        for (BundleOverwriteConflict existing : listOverwriteConflicts()) {
+            if (existing.getBundleId().equalsIgnoreCase(bundleId)
+                    && existing.getPackageKey().equalsIgnoreCase(packageKey)) {
+                BundleOverwriteConflict updated = new BundleOverwriteConflict(
+                        existing.getId(),
+                        bundleId,
+                        sourceZipName,
+                        packageKey,
+                        targetPaths,
+                        existing.getCreatedAtEpochMillis()
+                );
+                saveOverwriteConflict(updated);
+                return updated;
+            }
+        }
+
+        int nextId = 1;
+        for (BundleOverwriteConflict existing : listOverwriteConflicts()) {
+            try {
+                nextId = Math.max(nextId, Integer.parseInt(existing.getId()) + 1);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+
+        BundleOverwriteConflict created = new BundleOverwriteConflict(
+                String.valueOf(nextId),
+                bundleId,
+                sourceZipName,
+                packageKey,
+                targetPaths,
+                System.currentTimeMillis()
+        );
+        saveOverwriteConflict(created);
+        return created;
+    }
+
+    void deleteOverwriteConflict(String id) {
+        getConflictFile(id).delete();
+    }
+
+    void deleteOverwriteConflict(String bundleId, String packageKey) {
+        for (BundleOverwriteConflict conflict : listOverwriteConflicts()) {
+            if (conflict.getBundleId().equalsIgnoreCase(bundleId)
+                    && conflict.getPackageKey().equalsIgnoreCase(packageKey)) {
+                deleteOverwriteConflict(conflict.getId());
+            }
         }
     }
 
@@ -288,5 +385,24 @@ final class BundleStateStore {
 
     private File getPreferenceFile(String bundleId) {
         return new File(preferenceDirectory, bundleId + ".yml");
+    }
+
+    private File getConflictFile(String id) {
+        return new File(conflictDirectory, id + ".yml");
+    }
+
+    private void saveOverwriteConflict(BundleOverwriteConflict conflict) throws BundleException {
+        YamlConfiguration configuration = new YamlConfiguration();
+        configuration.set("id", conflict.getId());
+        configuration.set("bundleId", conflict.getBundleId());
+        configuration.set("sourceZipName", conflict.getSourceZipName());
+        configuration.set("packageKey", conflict.getPackageKey());
+        configuration.set("targetPaths", new ArrayList<>(conflict.getTargetPaths()));
+        configuration.set("createdAtEpochMillis", conflict.getCreatedAtEpochMillis());
+        try {
+            configuration.save(getConflictFile(conflict.getId()));
+        } catch (IOException ex) {
+            throw new BundleException("Failed to save overwrite conflict " + conflict.getId() + ".", ex);
+        }
     }
 }
