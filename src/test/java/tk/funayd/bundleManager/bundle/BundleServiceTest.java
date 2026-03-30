@@ -121,7 +121,7 @@ class BundleServiceTest {
     }
 
     @Test
-    void shouldRestoreBackedUpFileWhenPackageIsUninstalled() throws Exception {
+    void shouldRefuseToOverwriteExistingTargetFileDuringInstall() throws Exception {
         Path serverRoot = tempDir.resolve("server");
         JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
         BundleService service = new BundleService(plugin);
@@ -137,11 +137,29 @@ class BundleServiceTest {
         Files.createDirectories(targetFile.getParent());
         Files.writeString(targetFile, "Type: ZOMBIE\nHealth: 10\n");
 
-        service.installBundle("bundle-3", "MythicMobs");
-        assertEquals("Type: ZOMBIE\nHealth: 20\n", TestUtils.readString(targetFile));
-
-        service.uninstallBundle("bundle-3", "MythicMobs");
+        BundleException exception = assertThrows(BundleException.class, () -> service.installBundle("bundle-3", "MythicMobs"));
+        assertTrue(exception.getMessage().contains("Refusing to overwrite existing file"));
         assertEquals("Type: ZOMBIE\nHealth: 10\n", TestUtils.readString(targetFile));
+        assertTrue(service.listInstalledBundles().isEmpty());
+    }
+
+    @Test
+    void shouldResolveServerRootFromRelativePluginDataFolder() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+
+        java.lang.reflect.Method method = BundleService.class.getDeclaredMethod("deriveServerRoot", java.io.File.class);
+        method.setAccessible(true);
+
+        Path resolved = (Path) method.invoke(service, new java.io.File("plugins/BundleManager"));
+        Path expected = new java.io.File("plugins/BundleManager").getAbsoluteFile()
+                .toPath()
+                .getParent()
+                .getParent()
+                .normalize();
+
+        assertEquals(expected, resolved);
     }
 
     @Test
@@ -359,6 +377,60 @@ class BundleServiceTest {
     }
 
     @Test
+    void shouldUninstallBundleWhenSourceIsRemovedOnReload() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/removed-bundle.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "MythicMobs/Mobs/Zombie.yml", "zombie:\n  Type: ZOMBIE\n"
+        ));
+
+        BundleLoadReport firstLoad = service.autoLoadBundles();
+        assertEquals(1, firstLoad.getInstalledPackageCount());
+        assertTrue(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/1_Zombie.yml")));
+
+        Files.delete(bundleZip);
+
+        BundleLoadReport reload = service.autoLoadBundles();
+        assertEquals(0, reload.getInstalledPackageCount());
+        assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/1_Zombie.yml")));
+        assertTrue(service.listInstalledBundles().isEmpty());
+        assertTrue(reload.getWarnings().stream().anyMatch(message -> message.contains("no longer exists")));
+    }
+
+    @Test
+    void shouldReinstallBundleWhenSourceSha1ChangesOnReload() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleZip = serverRoot.resolve("plugins/BundleManager/bundles/changed-bundle.zip");
+        TestUtils.createZip(bundleZip, Map.of(
+                "MythicMobs/Mobs/Zombie.yml", "zombie:\n  Type: ZOMBIE\n  Health: 20\n"
+        ));
+
+        BundleLoadReport firstLoad = service.autoLoadBundles();
+        assertEquals(1, firstLoad.getInstalledPackageCount());
+        assertTrue(TestUtils.readString(serverRoot.resolve("plugins/MythicMobs/Mobs/1_Zombie.yml")).contains("Health: 20"));
+
+        TestUtils.createZip(bundleZip, Map.of(
+                "MythicMobs/Mobs/Zombie.yml", "zombie:\n  Type: ZOMBIE\n  Health: 40\n"
+        ));
+
+        BundleLoadReport reload = service.autoLoadBundles();
+        assertEquals(1, reload.getInstalledPackageCount());
+        assertEquals(1, reload.getInstalledBundleCount());
+        assertTrue(TestUtils.readString(serverRoot.resolve("plugins/MythicMobs/Mobs/1_Zombie.yml")).contains("Health: 40"));
+        assertTrue(reload.getWarnings().stream().anyMatch(message -> message.contains("Reinstalled from updated source")));
+        YamlConfiguration preference = YamlConfiguration.loadConfiguration(serverRoot.resolve("plugins/BundleManager/data/preferences/1.yml").toFile());
+        assertFalse(preference.getString("sourceSha1", "").isBlank());
+    }
+
+    @Test
     void shouldInstallRootResourcePackToBundleManagerPackDirectory() throws Exception {
         Path serverRoot = tempDir.resolve("server");
         JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
@@ -403,7 +475,7 @@ class BundleServiceTest {
         Files.writeString(bundleRoot.resolve("vanilla/Pack/assets/example.txt"), "vanilla");
         Files.writeString(bundleRoot.resolve("model/Pack/assets/example.txt"), "model");
 
-        assertEquals(List.of("ResourcePack@model+pack", "ResourcePack@vanilla+pack"), service.listInstallablePackages("PACK_BUNDLE"));
+        assertEquals(List.of("ResourcePack@model", "ResourcePack@vanilla"), service.listInstallablePackages("PACK_BUNDLE"));
 
         service.autoLoadBundles();
 
@@ -415,8 +487,8 @@ class BundleServiceTest {
         assertTrue(views.get(0).getPackageViews().stream().anyMatch(view -> view.getDisplayName().equals("ResourcePack [2]")));
         assertTrue(promptMessages.stream().anyMatch(message -> message.contains("--- ResourcePack ---")));
         assertEquals(2, promptMessages.stream().filter(message -> message.startsWith("    ")).count());
-        assertTrue(Files.exists(serverRoot.resolve("plugins/BundleManager/pack/1_model_pack/pack.mcmeta"))
-                || Files.exists(serverRoot.resolve("plugins/BundleManager/pack/1_vanilla_pack/pack.mcmeta")));
+        assertTrue(Files.exists(serverRoot.resolve("plugins/BundleManager/pack/1_model/pack.mcmeta"))
+                || Files.exists(serverRoot.resolve("plugins/BundleManager/pack/1_vanilla/pack.mcmeta")));
     }
 
     @Test
@@ -523,6 +595,92 @@ class BundleServiceTest {
         assertFalse(Files.exists(serverRoot.resolve("plugins/MythicMobs/Mobs/" + shortId + "_vanilla_VanillaMob.yml")));
         assertTrue(Files.exists(serverRoot.resolve("plugins/ModelEngine/blueprints/vanilla_model.yml")));
         assertFalse(Files.exists(serverRoot.resolve("plugins/ModelEngine/blueprints/modded_model.yml")));
+    }
+
+    @Test
+    void shouldFindSupportedPluginFoldersRecursivelyAndReduceVariantFromFullPath() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        Path bundleRoot = serverRoot.resolve("plugins/BundleManager/bundles/NESTED_VARIANTS");
+        Files.createDirectories(bundleRoot.resolve("shared/vanilla/content/MythicMobs/Mobs"));
+        Files.createDirectories(bundleRoot.resolve("shared/modded/content/MythicMobs/Mobs"));
+        Files.writeString(bundleRoot.resolve("shared/vanilla/content/MythicMobs/Mobs/VanillaMob.yml"), "vanilla:\n  Type: ZOMBIE\n");
+        Files.writeString(bundleRoot.resolve("shared/modded/content/MythicMobs/Mobs/ModdedMob.yml"), "modded:\n  Type: SKELETON\n");
+
+        assertEquals(List.of("MythicMobs@modded", "MythicMobs@vanilla"), service.listInstallablePackages("NESTED_VARIANTS"));
+
+        service.autoLoadBundles();
+
+        List<String> promptMessages = service.openVariantPrompt(service.listInstalledBundles().get(0).getBundleShortId());
+        assertTrue(promptMessages.stream().anyMatch(message -> message.contains("--- MythicMobs ---")));
+        assertTrue(promptMessages.stream().anyMatch(message -> message.contains("1. modded") || message.contains("1. vanilla")));
+        assertTrue(service.listBundleStatusViews().get(0).getPackageViews().stream()
+                .anyMatch(view -> view.getDisplayName().equals("MythicMobs [2]")));
+    }
+
+    @Test
+    void shouldNotMatchOtherBundleIdsByPrefixWhenListingPackageState() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        TestUtils.createZip(serverRoot.resolve("plugins/BundleManager/bundles/Bundle One.zip"), Map.of(
+                "AdvancedEnchantments/config.yml", "enabled: true\n"
+        ));
+        TestUtils.createZip(serverRoot.resolve("plugins/BundleManager/bundles/Bundle Ten.zip"), Map.of(
+                "ItemsAdder/contents/my_pack/configs/example.yml", "enabled: true\n"
+        ));
+        Files.writeString(serverRoot.resolve("plugins/BundleManager/data/bundle-index.yml"), """
+                entries:
+                  bundle one_zip: '1'
+                  bundle ten_zip: '10'
+                nextId: 11
+                """);
+        Files.createDirectories(serverRoot.resolve("plugins/ItemsAdder"));
+        Files.writeString(serverRoot.resolve("plugins/ItemsAdder/config.yml"), "contents-folders-priorities: []\n");
+
+        service.installBundle("Bundle Ten", "ItemsAdder");
+
+        List<BundleStatusView> views = service.listBundleStatusViews();
+        BundleStatusView bundleOne = views.stream()
+                .filter(view -> view.getBundleId().equals("1"))
+                .findFirst()
+                .orElseThrow();
+
+        assertTrue(bundleOne.getPackageViews().isEmpty());
+    }
+
+    @Test
+    void shouldSortBundleStatusViewsByNumericBundleId() throws Exception {
+        Path serverRoot = tempDir.resolve("server");
+        JavaPlugin plugin = TestUtils.mockPlugin(serverRoot);
+        BundleService service = new BundleService(plugin);
+        service.initialize();
+
+        TestUtils.createZip(serverRoot.resolve("plugins/BundleManager/bundles/Bundle One.zip"), Map.of(
+                "MythicMobs/Mobs/One.yml", "one:\n  Type: ZOMBIE\n"
+        ));
+        TestUtils.createZip(serverRoot.resolve("plugins/BundleManager/bundles/Bundle Two.zip"), Map.of(
+                "MythicMobs/Mobs/Two.yml", "two:\n  Type: ZOMBIE\n"
+        ));
+        TestUtils.createZip(serverRoot.resolve("plugins/BundleManager/bundles/Bundle Ten.zip"), Map.of(
+                "MythicMobs/Mobs/Ten.yml", "ten:\n  Type: ZOMBIE\n"
+        ));
+        Files.writeString(serverRoot.resolve("plugins/BundleManager/data/bundle-index.yml"), """
+                entries:
+                  bundle one_zip: '1'
+                  bundle two_zip: '2'
+                  bundle ten_zip: '10'
+                nextId: 11
+                """);
+
+        List<BundleStatusView> views = service.listBundleStatusViews();
+
+        assertEquals(List.of("1", "2", "10"), views.stream().map(BundleStatusView::getBundleId).toList());
     }
 
     private YamlConfiguration deluxeYamlAfter(Path configPath) {

@@ -2,6 +2,7 @@ package tk.funayd.bundleManager;
 
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
+import tk.funayd.bundleManager.bundle.BundleLoadReport;
 import tk.funayd.bundleManager.bundle.BundleService;
 import tk.funayd.bundleManager.command.BundleCommand;
 
@@ -23,9 +24,17 @@ public final class BundleManager extends JavaPlugin {
         command.setExecutor(bundleCommand);
         command.setTabCompleter(bundleCommand);
 
-        bundleService.autoLoadBundles();
+        BundleLoadReport report = bundleService.autoLoadBundles();
+        getLogger().info("Installed " + report.getInstalledPackageCount()
+                + " package from " + report.getInstalledBundleCount() + " bundle.");
         if (bundleService.hasIgnoredIncomingFiles()) {
             getLogger().warning("Ignored non-zip files in bundles folder. Only .zip bundles are loaded.");
+        }
+        for (String warning : report.getWarnings()) {
+            getLogger().warning(warning);
+        }
+        for (String error : report.getErrors()) {
+            getLogger().warning(error);
         }
 
         getLogger().info("BundleManager is ready.");

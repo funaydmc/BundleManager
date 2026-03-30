@@ -6,6 +6,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabExecutor;
 import tk.funayd.bundleManager.bundle.BundleActionReport;
 import tk.funayd.bundleManager.bundle.BundleException;
+import tk.funayd.bundleManager.bundle.BundleLoadReport;
 import tk.funayd.bundleManager.bundle.BundleOverallState;
 import tk.funayd.bundleManager.bundle.BundlePackageState;
 import tk.funayd.bundleManager.bundle.BundlePackageView;
@@ -156,11 +157,21 @@ public final class BundleCommand implements TabExecutor {
     }
 
     private void reloadBundles(CommandSender sender) {
-        bundleService.autoLoadBundles();
-        sender.sendMessage(ChatColor.GREEN + "Reloaded bundles from incoming folder.");
+        BundleLoadReport report = bundleService.autoLoadBundles();
+        sender.sendMessage(ChatColor.GREEN + "Installed "
+                + ChatColor.AQUA + report.getInstalledPackageCount()
+                + ChatColor.GREEN + " package from "
+                + ChatColor.AQUA + report.getInstalledBundleCount()
+                + ChatColor.GREEN + " bundle.");
         sender.sendMessage(ChatColor.GRAY + "Disabled bundles/packages were skipped.");
         if (bundleService.hasIgnoredIncomingFiles()) {
             sender.sendMessage(ChatColor.YELLOW + "Ignored non-zip files in bundles folder. Only .zip bundles are loaded.");
+        }
+        for (String warning : report.getWarnings()) {
+            sender.sendMessage(ChatColor.YELLOW + warning);
+        }
+        for (String error : report.getErrors()) {
+            sender.sendMessage(ChatColor.RED + error);
         }
     }
 

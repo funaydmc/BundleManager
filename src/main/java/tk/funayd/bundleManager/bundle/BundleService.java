@@ -22,22 +22,16 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
 
 public final class BundleService {
 
@@ -46,6 +40,8 @@ public final class BundleService {
 
     private final JavaPlugin plugin;
     private final InstallerRegistry installerRegistry;
+    private final BundleArchiveInspector archiveInspector;
+    private final BundleStateStore stateStore;
     private final File incomingBundleDirectory;
     private final File dataDirectory;
     private final File packageDirectory;
@@ -76,15 +72,13 @@ public final class BundleService {
         this.preferenceDirectory = new File(dataDirectory, "preferences");
         this.backupDirectory = new File(dataDirectory, "backups");
         this.bundleIndexFile = new File(dataDirectory, "bundle-index.yml");
+        this.archiveInspector = new BundleArchiveInspector(installerRegistry);
+        this.stateStore = new BundleStateStore(packageDirectory, preferenceDirectory, bundleIndexFile);
         this.failedPackageMessages = new LinkedHashMap<>();
         this.pendingVariantOptions = List.of();
         this.pendingVariantMessages = List.of();
 
-        File pluginsDirectory = plugin.getDataFolder().getParentFile();
-        File root = pluginsDirectory != null && pluginsDirectory.getParentFile() != null
-                ? pluginsDirectory.getParentFile()
-                : plugin.getDataFolder().getAbsoluteFile();
-        this.serverRoot = root.toPath().toAbsolutePath().normalize();
+        this.serverRoot = deriveServerRoot(plugin.getDataFolder());
     }
 
     public void initialize() {
@@ -164,17 +158,54 @@ public final class BundleService {
         }
     }
 
-    public void autoLoadBundles() {
+    public BundleLoadReport autoLoadBundles() {
         failedPackageMessages.clear();
         clearPendingVariantPrompt();
-        for (BundleArchiveDescriptor descriptor : scanIncomingBundleDescriptors()) {
+        int installedPackageCount = 0;
+        int installedBundleCount = 0;
+        ArrayList<String> warnings = new ArrayList<>();
+        ArrayList<String> errors = new ArrayList<>();
+        List<BundleArchiveDescriptor> descriptors = scanIncomingBundleDescriptors();
+        LinkedHashMap<String, BundleArchiveDescriptor> descriptorById = new LinkedHashMap<>();
+        for (BundleArchiveDescriptor descriptor : descriptors) {
+            descriptorById.put(descriptor.bundleId().toLowerCase(Locale.ROOT), descriptor);
+        }
+
+        for (BundleSummary installedBundle : listInstalledBundles()) {
+            if (descriptorById.containsKey(installedBundle.getBundleId().toLowerCase(Locale.ROOT))) {
+                continue;
+            }
             try {
-                autoLoadBundle(descriptor);
+                List<BundleRecord> removedRecords = uninstallBundle(installedBundle.getBundleId(), null);
+                clearBundleFailures(installedBundle.getBundleId());
+                if (!removedRecords.isEmpty()) {
+                    warnings.add("Removed bundle " + installedBundle.getSourceZipName()
+                            + " because it no longer exists in bundles folder.");
+                }
             } catch (BundleException ex) {
-                recordBundleFailure(descriptor.bundleId(), "__bundle__", ex.getMessage());
-                plugin.getLogger().warning("Failed to auto-load bundle " + descriptor.sourceZipName() + ": " + ex.getMessage());
+                errors.add("Failed to remove missing bundle " + installedBundle.getSourceZipName() + ": " + ex.getMessage());
             }
         }
+
+        for (BundleArchiveDescriptor descriptor : descriptors) {
+            try {
+                BundleActionReport report = reconcileBundle(descriptor);
+                if (!report.getSucceededPackages().isEmpty()) {
+                    installedPackageCount += report.getSucceededPackages().size();
+                    installedBundleCount++;
+                }
+                warnings.addAll(report.getMessages());
+            } catch (BundleException ex) {
+                recordBundleFailure(descriptor.bundleId(), "__bundle__", ex.getMessage());
+                errors.add("Failed to auto-load bundle " + descriptor.sourceZipName() + ": " + ex.getMessage());
+            }
+        }
+        return new BundleLoadReport(
+                installedPackageCount,
+                installedBundleCount,
+                deduplicatePackages(warnings),
+                deduplicatePackages(errors)
+        );
     }
 
     public boolean hasIgnoredIncomingFiles() {
@@ -253,6 +284,7 @@ public final class BundleService {
         preference = new BundlePreference(
                 knownBundle.bundleId(),
                 knownBundle.sourceZipName(),
+                preference.getSourceSha1(),
                 false,
                 disabledPackages,
                 selectedBundleVariant,
@@ -307,6 +339,7 @@ public final class BundleService {
             preference = new BundlePreference(
                     knownBundle.bundleId(),
                     knownBundle.sourceZipName(),
+                    preference.getSourceSha1(),
                     false,
                     List.of(),
                     preference.getSelectedBundleVariant(),
@@ -322,6 +355,7 @@ public final class BundleService {
             preference = new BundlePreference(
                     knownBundle.bundleId(),
                     knownBundle.sourceZipName(),
+                    preference.getSourceSha1(),
                     false,
                     disabledPackages,
                     preference.getSelectedBundleVariant(),
@@ -337,6 +371,7 @@ public final class BundleService {
             preference = new BundlePreference(
                     knownBundle.bundleId(),
                     knownBundle.sourceZipName(),
+                    preference.getSourceSha1(),
                     false,
                     disabledPackages,
                     preference.getSelectedBundleVariant(),
@@ -360,6 +395,7 @@ public final class BundleService {
             preference = new BundlePreference(
                     knownBundle.bundleId(),
                     knownBundle.sourceZipName(),
+                    preference.getSourceSha1(),
                     true,
                     List.of(),
                     preference.getSelectedBundleVariant(),
@@ -391,6 +427,7 @@ public final class BundleService {
         preference = new BundlePreference(
                 knownBundle.bundleId(),
                 knownBundle.sourceZipName(),
+                preference.getSourceSha1(),
                 false,
                 disabledPackages,
                 preference.getSelectedBundleVariant(),
@@ -450,13 +487,15 @@ public final class BundleService {
         for (KnownBundle knownBundle : bundles.values()) {
             views.add(buildStatusView(knownBundle));
         }
-        views.sort(Comparator.comparing(BundleStatusView::getSourceZipName, String.CASE_INSENSITIVE_ORDER));
+        views.sort(Comparator
+                .comparingInt((BundleStatusView view) -> parseBundleOrder(view.getBundleId()))
+                .thenComparing(BundleStatusView::getBundleId, String.CASE_INSENSITIVE_ORDER));
         return views;
     }
 
     public List<BundleInstallResult> installBundle(String archiveFileName, String requestedPackageKey) throws BundleException {
         File archiveFile = resolveBundleArchiveFile(archiveFileName);
-        String bundleId = computeBundleId(archiveFile);
+        String bundleId = stateStore.computeBundleId(archiveFile, plugin.getLogger());
         String bundleIdShort = shortId(bundleId);
 
         try (BundleArchive archive = openArchive(archiveFile)) {
@@ -469,7 +508,7 @@ public final class BundleService {
             List<BundlePackageDescriptor> installablePackages = resolveRequestedPackages(packageDescriptors, requestedPackageKey);
             for (BundlePackageDescriptor packageDescriptor : installablePackages) {
                 String recordId = recordId(bundleId, packageDescriptor.packageKey());
-                if (getRecordFile(recordId).exists()) {
+                if (stateStore.recordExists(recordId)) {
                     throw new BundleException("Package '" + packageDescriptor.packageKey()
                             + "' is already installed for bundle " + bundleIdShort + ".");
                 }
@@ -530,22 +569,7 @@ public final class BundleService {
     }
 
     public List<BundleRecord> listInstalledPackageRecords() {
-        File[] files = packageDirectory.listFiles((dir, name) -> name.endsWith(".yml"));
-        if (files == null || files.length == 0) {
-            return List.of();
-        }
-
-        List<BundleRecord> records = new ArrayList<>(files.length);
-        for (File file : files) {
-            try {
-                records.add(loadRecord(file));
-            } catch (BundleException ex) {
-                plugin.getLogger().warning("Skipping broken record " + file.getName() + ": " + ex.getMessage());
-            }
-        }
-
-        records.sort(Comparator.comparingLong(BundleRecord::getInstalledAtEpochMillis).reversed());
-        return records;
+        return stateStore.listInstalledPackageRecords(plugin.getLogger());
     }
 
     private BundleInstallResult installPackage(
@@ -583,6 +607,7 @@ public final class BundleService {
                 throw new BundleException("Package '" + packageKey + "' does not contain any installable files.");
             }
 
+            validateNoExistingTargets(packageKey, plannedFiles);
             warnings.addAll(validateIdentityConflicts(archive, installer, packageKey, plannedFiles));
 
             ReferenceRewriteContext rewriteContext = new ReferenceRewriteContext(plannedFiles);
@@ -598,6 +623,7 @@ public final class BundleService {
             );
 
             mergeConfigMutations(requestedMutations, installer.buildConfigMutations(plannedFiles, installPrefix));
+            validateConfigMutationPlan(packageKey, requestedMutations);
             appliedMutations.addAll(applyConfigMutations(requestedMutations, warnings));
 
             BundleRecord record = new BundleRecord(
@@ -611,7 +637,7 @@ public final class BundleService {
                     appliedMutations,
                     new ArrayList<>(createdDirectories)
             );
-            saveRecord(record);
+            stateStore.saveRecord(record);
             return new BundleInstallResult(record, warnings);
         } catch (IOException ex) {
             safeRollbackConfigMutations(appliedMutations);
@@ -772,16 +798,8 @@ public final class BundleService {
             String targetRelativePath = PathUtils.normalizeRelativePath(plannedFile.getTargetRelativePath());
             Path targetPath = resolveServerPath(targetRelativePath);
 
-            // Moi file de target dang ton tai deu duoc backup de uninstall co the phuc hoi.
+            // Install moi chi duoc phep them file moi, khong ghi de file san co.
             ensureParentDirectories(targetPath.getParent(), createdDirectories);
-
-            String backupPath = "";
-            if (Files.exists(targetPath)) {
-                backupPath = PathUtils.normalizeRelativePath(recordId(bundleId, packageKey) + "/" + targetRelativePath);
-                Path backupTarget = backupDirectory.toPath().resolve(backupPath).normalize();
-                createDirectory(backupTarget.getParent());
-                Files.copy(targetPath, backupTarget, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
-            }
 
             BundleArchiveEntry archiveEntry = new BundleArchiveEntry(plannedFile.getSourceEntryName(), false);
 
@@ -790,10 +808,10 @@ public final class BundleService {
                 try (InputStream inputStream = archive.openInputStream(archiveEntry)) {
                     rewrittenBytes = installer.rewriteFileContent(plannedFile, inputStream.readAllBytes(), rewriteContext);
                 }
-                Files.write(targetPath, rewrittenBytes);
+                Files.write(targetPath, rewrittenBytes, StandardOpenOption.CREATE_NEW);
             } else {
                 try (InputStream inputStream = archive.openInputStream(archiveEntry)) {
-                    Files.copy(inputStream, targetPath, StandardCopyOption.REPLACE_EXISTING);
+                    Files.copy(inputStream, targetPath);
                 }
             }
 
@@ -801,8 +819,23 @@ public final class BundleService {
                     plannedFile.getSourceEntryName(),
                     packageKey,
                     targetRelativePath,
-                    backupPath
+                    ""
             ));
+        }
+    }
+
+    private void validateNoExistingTargets(
+            String packageKey,
+            List<ResolvedBundleFile> plannedFiles
+    ) throws BundleException {
+        for (ResolvedBundleFile plannedFile : plannedFiles) {
+            String targetRelativePath = PathUtils.normalizeRelativePath(plannedFile.getTargetRelativePath());
+            Path targetPath = resolveServerPath(targetRelativePath);
+            if (Files.exists(targetPath)) {
+                throw new BundleException(
+                        "Refusing to overwrite existing file for package '" + packageKey + "': " + targetRelativePath
+                );
+            }
         }
     }
 
@@ -900,11 +933,32 @@ public final class BundleService {
         return summaries;
     }
 
-    private void autoLoadBundle(BundleArchiveDescriptor descriptor) throws BundleException {
-        BundlePreference preference = loadPreference(descriptor.bundleId(), descriptor.sourceZipName());
+    private BundleActionReport reconcileBundle(BundleArchiveDescriptor descriptor) throws BundleException {
+        BundlePreference storedPreference = loadPreference(descriptor.bundleId(), descriptor.sourceZipName());
+        boolean hashChanged = storedPreference.getSourceSha1() != null
+                && !storedPreference.getSourceSha1().equalsIgnoreCase(descriptor.sourceSha1());
+        BundlePreference preference = updateStoredBundleMetadata(storedPreference, descriptor);
+        if (hashChanged) {
+            if (!findBundleRecords(descriptor.bundleId()).isEmpty()) {
+                uninstallBundle(descriptor.bundleId(), null);
+            }
+            clearBundleFailures(descriptor.bundleId());
+            savePreference(preference);
+        } else if (!Objects.equals(storedPreference.getSourceSha1(), descriptor.sourceSha1())
+                || !storedPreference.getSourceZipName().equalsIgnoreCase(descriptor.sourceZipName())) {
+            savePreference(preference);
+        }
+
         if (preference.isBundleDisabled()) {
             clearBundleFailures(descriptor.bundleId());
-            return;
+            return new BundleActionReport(
+                    descriptor.bundleId(),
+                    descriptor.sourceZipName(),
+                    List.of(),
+                    List.of(),
+                    descriptor.installablePackages(),
+                    hashChanged ? List.of("Bundle content changed. Stored SHA-1 was updated for disabled bundle.") : List.of()
+            );
         }
 
         VariantSelectionDecision selectionDecision = resolveVariantSelection(descriptor, preference, null, true);
@@ -912,8 +966,60 @@ public final class BundleService {
             savePreference(selectionDecision.preference());
             preference = selectionDecision.preference();
         }
+
+        if (!hashChanged && !hasSyncWork(descriptor, selectionDecision.targetPackages())) {
+            clearBundleFailures(descriptor.bundleId());
+            return new BundleActionReport(
+                    descriptor.bundleId(),
+                    descriptor.sourceZipName(),
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    selectionDecision.messages()
+            );
+        }
+
         uninstallConflictingVariantPackages(descriptor, selectionDecision.targetPackages());
-        installEnabledPackages(descriptor, selectionDecision.targetPackages(), preference, false);
+        BundleActionReport report = installEnabledPackages(descriptor, selectionDecision.targetPackages(), preference, false);
+        ArrayList<String> messages = new ArrayList<>(selectionDecision.messages());
+        if (hashChanged) {
+            messages.add("Bundle content changed. Reinstalled from updated source.");
+        }
+        messages.addAll(report.getMessages());
+        return new BundleActionReport(
+                report.getBundleId(),
+                report.getSourceZipName(),
+                report.getSucceededPackages(),
+                report.getFailedPackages(),
+                report.getDisabledPackages(),
+                deduplicatePackages(messages)
+        );
+    }
+
+    private boolean hasSyncWork(BundleArchiveDescriptor descriptor, List<String> targetPackages) {
+        List<String> installedPackages = listInstalledPackageKeys(descriptor.bundleId());
+        for (String targetPackage : targetPackages) {
+            if (!containsIgnoreCase(installedPackages, targetPackage)) {
+                return true;
+            }
+        }
+
+        for (BundleVariantGroup variantGroup : descriptor.variantGroups()) {
+            String selectedPackage = targetPackages.stream()
+                    .filter(target -> variantGroup.options().stream().anyMatch(option -> option.packageKey().equalsIgnoreCase(target)))
+                    .findFirst()
+                    .orElse(null);
+            for (BundleVariantOption option : variantGroup.options()) {
+                if (selectedPackage != null && option.packageKey().equalsIgnoreCase(selectedPackage)) {
+                    continue;
+                }
+                if (containsIgnoreCase(installedPackages, option.packageKey())) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private BundleActionReport installEnabledPackages(
@@ -941,7 +1047,6 @@ public final class BundleService {
 
             if (containsIgnoreCase(listInstalledPackageKeys(descriptor.bundleId()), installablePackage)) {
                 clearPackageFailure(descriptor.bundleId(), installablePackage);
-                succeededPackages.add(installablePackage);
                 continue;
             }
 
@@ -1049,6 +1154,7 @@ public final class BundleService {
         BundlePreference updatedPreference = new BundlePreference(
                 preference.getBundleId(),
                 preference.getSourceZipName(),
+                preference.getSourceSha1(),
                 preference.isBundleDisabled(),
                 preference.getDisabledPackages(),
                 selectedBundleVariant,
@@ -1072,6 +1178,7 @@ public final class BundleService {
             return new BundlePreference(
                     preference.getBundleId(),
                     preference.getSourceZipName(),
+                    preference.getSourceSha1(),
                     preference.isBundleDisabled(),
                     preference.getDisabledPackages(),
                     preference.getSelectedBundleVariant(),
@@ -1422,11 +1529,13 @@ public final class BundleService {
         ArrayList<BundleArchiveDescriptor> descriptors = new ArrayList<>(files.length);
         for (File file : files) {
             try {
-                String bundleId = computeBundleId(file);
+                String bundleId = stateStore.computeBundleId(file, plugin.getLogger());
+                String sourceSha1 = computeSourceSha1(file);
                 ArchivePackageInfo packageInfo = inspectArchivePackages(file);
                 descriptors.add(new BundleArchiveDescriptor(
                         bundleId,
                         file.getName(),
+                        sourceSha1,
                         packageInfo.installablePackages(),
                         packageInfo.allPackages(),
                         packageInfo.variantGroups(),
@@ -1442,440 +1551,12 @@ public final class BundleService {
 
     private ArchivePackageInfo inspectArchivePackages(File archiveFile) throws BundleException, IOException {
         try (BundleArchive archive = openArchive(archiveFile)) {
-            TreeSet<String> installable = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-            TreeSet<String> allPackages = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-            List<BundlePackageDescriptor> descriptors = discoverPackageDescriptors(archive);
-            List<BundleVariantGroup> variantGroups = buildVariantGroups(descriptors);
-            for (BundlePackageDescriptor packageDescriptor : descriptors) {
-                allPackages.add(packageDescriptor.packageKey());
-                if (packageDescriptor.supported()) {
-                    installable.add(packageDescriptor.packageKey());
-                }
-            }
-            return new ArchivePackageInfo(
-                    new ArrayList<>(installable),
-                    new ArrayList<>(allPackages),
-                    variantGroups,
-                    buildVariantChoiceGroups(variantGroups)
-            );
+            return archiveInspector.inspectArchivePackages(archive);
         }
     }
 
     private List<BundlePackageDescriptor> discoverPackageDescriptors(BundleArchive archive) throws BundleException {
-        ArrayList<BundleArchiveEntry> normalizedEntries = new ArrayList<>();
-        for (BundleArchiveEntry entry : archive.entries()) {
-            if (entry.isDirectory()) {
-                continue;
-            }
-            normalizedEntries.add(new BundleArchiveEntry(PathUtils.normalizeZipPath(entry.getName()), false));
-        }
-
-        List<BundlePackageMatch> resourcePackMatches = discoverResourcePackMatches(normalizedEntries);
-        LinkedHashMap<String, BundlePackageMatch> matches = new LinkedHashMap<>();
-        LinkedHashMap<String, ArrayList<BundleArchiveEntry>> entriesByPackage = new LinkedHashMap<>();
-
-        for (BundleArchiveEntry entry : normalizedEntries) {
-            String normalizedEntry = entry.getName();
-            BundlePackageMatch match = findResourcePackMatch(normalizedEntry, resourcePackMatches);
-            if (match == null) {
-                match = detectPackageMatch(normalizedEntry);
-            }
-            if (match == null) {
-                continue;
-            }
-
-            String descriptorKey = descriptorKey(match);
-            matches.putIfAbsent(descriptorKey, match);
-            entriesByPackage.computeIfAbsent(descriptorKey, ignored -> new ArrayList<>())
-                    .add(new BundleArchiveEntry(normalizedEntry, false));
-        }
-
-        LinkedHashMap<String, List<BundlePackageMatch>> supportedByPlugin = new LinkedHashMap<>();
-        for (BundlePackageMatch match : matches.values()) {
-            if (!match.supported()) {
-                continue;
-            }
-            supportedByPlugin.computeIfAbsent(match.pluginKey().toLowerCase(Locale.ROOT), ignored -> new ArrayList<>()).add(match);
-        }
-
-        ArrayList<BundlePackageDescriptor> descriptors = new ArrayList<>(matches.size());
-        for (Map.Entry<String, BundlePackageMatch> entry : matches.entrySet()) {
-            BundlePackageMatch match = entry.getValue();
-            List<BundlePackageMatch> pluginMatches = supportedByPlugin.getOrDefault(match.pluginKey().toLowerCase(Locale.ROOT), List.of());
-            String packageKey = match.supported() && pluginMatches.size() > 1
-                    ? buildPackageKey(match.pluginKey(), match.normalizedVariantParts())
-                    : match.pluginKey();
-            descriptors.add(new BundlePackageDescriptor(
-                    packageKey,
-                    match.pluginKey(),
-                    match.rootPath(),
-                    match.supported(),
-                    entriesByPackage.getOrDefault(entry.getKey(), new ArrayList<>()),
-                    match.rawVariantParts(),
-                    match.normalizedVariantParts()
-            ));
-        }
-        descriptors.sort(Comparator.comparing(BundlePackageDescriptor::packageKey, String.CASE_INSENSITIVE_ORDER));
-        return descriptors;
-    }
-
-    private List<BundlePackageMatch> discoverResourcePackMatches(List<BundleArchiveEntry> entries) throws BundleException {
-        LinkedHashMap<String, BundlePackageMatch> matches = new LinkedHashMap<>();
-        for (BundleArchiveEntry entry : entries) {
-            List<String> segments = PathUtils.splitSegments(entry.getName());
-            BundlePackageMatch match = detectResourcePackRoot(segments);
-            if (match != null) {
-                matches.putIfAbsent(match.rootPath().toLowerCase(Locale.ROOT), match);
-            }
-        }
-
-        ArrayList<BundlePackageMatch> ordered = new ArrayList<>(matches.values());
-        ordered.sort(Comparator.comparingInt((BundlePackageMatch match) -> match.rootPath().length()).reversed());
-        return ordered;
-    }
-
-    private BundlePackageMatch findResourcePackMatch(
-            String normalizedEntry,
-            List<BundlePackageMatch> resourcePackMatches
-    ) {
-        String loweredEntry = normalizedEntry.toLowerCase(Locale.ROOT);
-        for (BundlePackageMatch match : resourcePackMatches) {
-            String loweredRoot = match.rootPath().toLowerCase(Locale.ROOT);
-            if (loweredRoot.isEmpty() || loweredEntry.equals(loweredRoot) || loweredEntry.startsWith(loweredRoot + "/")) {
-                return match;
-            }
-        }
-        return null;
-    }
-
-    private BundlePackageMatch detectPackageMatch(String normalizedEntry) throws BundleException {
-        List<String> segments = PathUtils.splitSegments(normalizedEntry);
-        if (segments.size() < 2) {
-            return null;
-        }
-
-        for (int index = 0; index < segments.size() - 1; index++) {
-            PluginFolderInfo folderInfo = parsePluginFolderInfo(segments.get(index));
-            if (folderInfo == null) {
-                continue;
-            }
-
-            Optional<SupportedPluginInstaller> installer = installerRegistry.find(folderInfo.pluginName());
-            if (installer.isEmpty()) {
-                continue;
-            }
-
-            ArrayList<String> variantParts = new ArrayList<>();
-            for (int variantIndex = 0; variantIndex < index; variantIndex++) {
-                addVariantToken(variantParts, segments.get(variantIndex));
-            }
-            addVariantToken(variantParts, folderInfo.variantName());
-
-            return new BundlePackageMatch(
-                    installer.get().getPluginKey(),
-                    String.join("/", segments.subList(0, index + 1)),
-                    true,
-                    rawVariantParts(segments, index, folderInfo.variantName()),
-                    variantParts
-            );
-        }
-
-        // Giu hanh vi cu cho unsupported top-level package, nhung khong xem file root la package.
-        PluginFolderInfo topLevelInfo = parsePluginFolderInfo(segments.get(0));
-        if (topLevelInfo == null) {
-            return null;
-        }
-
-        return new BundlePackageMatch(
-                topLevelInfo.pluginName(),
-                segments.get(0),
-                false,
-                topLevelInfo.variantName() == null ? List.of() : List.of(topLevelInfo.variantName()),
-                normalizeVariantParts(topLevelInfo.variantName() == null ? List.of() : List.of(topLevelInfo.variantName()))
-        );
-    }
-
-    private BundlePackageMatch detectResourcePackRoot(List<String> segments) throws BundleException {
-        String fileName = segments.get(segments.size() - 1);
-        if (!"pack.mcmeta".equalsIgnoreCase(fileName)) {
-            return null;
-        }
-
-        int resourcePackRootIndex = segments.size() - 2;
-        if (resourcePackRootIndex < 0) {
-            return new BundlePackageMatch(
-                    "ResourcePack",
-                    "",
-                    true,
-                    List.of(),
-                    List.of()
-            );
-        }
-
-        PluginFolderInfo folderInfo = parsePluginFolderInfo(segments.get(resourcePackRootIndex));
-        ArrayList<String> variantParts = new ArrayList<>();
-        for (int variantIndex = 0; variantIndex < resourcePackRootIndex; variantIndex++) {
-            addVariantToken(variantParts, segments.get(variantIndex));
-        }
-        addVariantToken(variantParts, folderInfo.variantName());
-        addVariantToken(variantParts, folderInfo.pluginName());
-
-        return new BundlePackageMatch(
-                "ResourcePack",
-                String.join("/", segments.subList(0, resourcePackRootIndex + 1)),
-                true,
-                rawResourcePackVariantParts(segments, resourcePackRootIndex, folderInfo),
-                variantParts
-        );
-    }
-
-    private List<String> rawResourcePackVariantParts(
-            List<String> segments,
-            int resourcePackRootIndex,
-            PluginFolderInfo folderInfo
-    ) {
-        ArrayList<String> parts = new ArrayList<>();
-        for (int variantIndex = 0; variantIndex < resourcePackRootIndex; variantIndex++) {
-            if (!segments.get(variantIndex).isBlank()) {
-                parts.add(segments.get(variantIndex).trim());
-            }
-        }
-        if (!folderInfo.pluginName().isBlank()) {
-            parts.add(folderInfo.pluginName().trim());
-        }
-        if (folderInfo.variantName() != null && !folderInfo.variantName().isBlank()) {
-            parts.add(folderInfo.variantName().trim());
-        }
-        return parts;
-    }
-
-    private List<String> rawVariantParts(List<String> segments, int pluginIndex, String suffixVariant) {
-        ArrayList<String> parts = new ArrayList<>();
-        for (int variantIndex = 0; variantIndex < pluginIndex; variantIndex++) {
-            if (!segments.get(variantIndex).isBlank()) {
-                parts.add(segments.get(variantIndex).trim());
-            }
-        }
-        if (suffixVariant != null && !suffixVariant.isBlank()) {
-            parts.add(suffixVariant.trim());
-        }
-        return parts;
-    }
-
-    private List<String> normalizeVariantParts(List<String> rawParts) {
-        ArrayList<String> normalized = new ArrayList<>();
-        for (String rawPart : rawParts) {
-            addVariantToken(normalized, rawPart);
-        }
-        return normalized;
-    }
-
-    private PluginFolderInfo parsePluginFolderInfo(String rawSegment) {
-        if (rawSegment == null) {
-            return null;
-        }
-
-        String segment = rawSegment.trim();
-        if (segment.isEmpty()) {
-            return null;
-        }
-
-        int openParen = segment.lastIndexOf('(');
-        if (openParen > 0 && segment.endsWith(")")) {
-            String pluginName = segment.substring(0, openParen).trim();
-            String variantName = segment.substring(openParen + 1, segment.length() - 1).trim();
-            if (!pluginName.isEmpty() && !variantName.isEmpty()) {
-                return new PluginFolderInfo(pluginName, variantName);
-            }
-        }
-
-        return new PluginFolderInfo(segment, null);
-    }
-
-    private List<BundleVariantGroup> buildVariantGroups(List<BundlePackageDescriptor> descriptors) {
-        LinkedHashMap<String, List<BundlePackageDescriptor>> grouped = new LinkedHashMap<>();
-        for (BundlePackageDescriptor descriptor : descriptors) {
-            if (!descriptor.supported()) {
-                continue;
-            }
-            grouped.computeIfAbsent(descriptor.pluginKey().toLowerCase(Locale.ROOT), ignored -> new ArrayList<>())
-                    .add(descriptor);
-        }
-
-        ArrayList<BundleVariantGroup> groups = new ArrayList<>();
-        for (List<BundlePackageDescriptor> pluginDescriptors : grouped.values()) {
-            if (pluginDescriptors.size() <= 1) {
-                continue;
-            }
-
-            List<List<String>> reducedParts = reduceVariantNames(pluginDescriptors.stream()
-                    .map(BundlePackageDescriptor::rawVariantParts)
-                    .toList());
-            ArrayList<BundleVariantOption> options = new ArrayList<>(pluginDescriptors.size());
-            for (int i = 0; i < pluginDescriptors.size(); i++) {
-                BundlePackageDescriptor descriptor = pluginDescriptors.get(i);
-                List<String> parts = reducedParts.get(i);
-                String displayName = parts.isEmpty()
-                        ? descriptor.packageKey()
-                        : String.join(".", parts);
-                options.add(new BundleVariantOption(descriptor.packageKey(), displayName));
-            }
-            options.sort(Comparator.comparing(BundleVariantOption::displayName, String.CASE_INSENSITIVE_ORDER));
-            groups.add(new BundleVariantGroup(pluginDescriptors.get(0).pluginKey(), options));
-        }
-        groups.sort(Comparator.comparing(BundleVariantGroup::pluginKey, String.CASE_INSENSITIVE_ORDER));
-        return groups;
-    }
-
-    private List<VariantChoiceGroup> buildVariantChoiceGroups(List<BundleVariantGroup> packageVariantGroups) {
-        ArrayList<VariantChoiceGroup> choiceGroups = new ArrayList<>();
-
-        VariantChoiceGroup bundleChoiceGroup = buildBundleChoiceGroup(packageVariantGroups);
-        if (bundleChoiceGroup != null) {
-            choiceGroups.add(bundleChoiceGroup);
-        }
-
-        for (BundleVariantGroup packageVariantGroup : packageVariantGroups) {
-            if (packageVariantGroup.options().size() <= 1) {
-                continue;
-            }
-
-            ArrayList<VariantChoiceOption> options = new ArrayList<>(packageVariantGroup.options().size());
-            for (BundleVariantOption option : packageVariantGroup.options()) {
-                LinkedHashMap<String, String> selections = new LinkedHashMap<>();
-                selections.put(packageVariantGroup.pluginKey().toLowerCase(Locale.ROOT), option.packageKey());
-                options.add(new VariantChoiceOption(option.displayName(), selections));
-            }
-            choiceGroups.add(new VariantChoiceGroup(packageVariantGroup.pluginKey(), options));
-        }
-
-        return choiceGroups;
-    }
-
-    private VariantChoiceGroup buildBundleChoiceGroup(List<BundleVariantGroup> packageVariantGroups) {
-        if (packageVariantGroups.size() <= 1) {
-            return null;
-        }
-
-        LinkedHashMap<String, BundleVariantAggregate> aggregated = new LinkedHashMap<>();
-        for (BundleVariantGroup packageVariantGroup : packageVariantGroups) {
-            for (BundleVariantOption option : packageVariantGroup.options()) {
-                String normalizedName = option.displayName().toLowerCase(Locale.ROOT);
-                BundleVariantAggregate aggregate = aggregated.computeIfAbsent(
-                        normalizedName,
-                        ignored -> new BundleVariantAggregate(option.displayName())
-                );
-                aggregate.selections.put(packageVariantGroup.pluginKey().toLowerCase(Locale.ROOT), option.packageKey());
-            }
-        }
-
-        ArrayList<VariantChoiceOption> options = new ArrayList<>();
-        for (BundleVariantAggregate aggregate : aggregated.values()) {
-            if (aggregate.selections.size() <= 1) {
-                continue;
-            }
-            options.add(new VariantChoiceOption(
-                    aggregate.displayName,
-                    new LinkedHashMap<>(aggregate.selections)
-            ));
-        }
-
-        if (options.size() <= 1) {
-            return null;
-        }
-
-        options.sort(Comparator.comparing(VariantChoiceOption::displayName, String.CASE_INSENSITIVE_ORDER));
-        return new VariantChoiceGroup("Bundle", options);
-    }
-
-    private List<List<String>> reduceVariantNames(List<List<String>> rawParts) {
-        ArrayList<List<String>> reduced = new ArrayList<>(rawParts.size());
-        for (List<String> parts : rawParts) {
-            reduced.add(new ArrayList<>(parts));
-        }
-
-        while (allShareCommonPrefix(reduced)) {
-            for (List<String> parts : reduced) {
-                parts.remove(0);
-            }
-        }
-
-        while (allShareCommonSuffix(reduced)) {
-            for (List<String> parts : reduced) {
-                parts.remove(parts.size() - 1);
-            }
-        }
-
-        for (int i = 0; i < reduced.size(); i++) {
-            if (reduced.get(i).isEmpty()) {
-                reduced.set(i, new ArrayList<>(rawParts.get(i)));
-            }
-        }
-        return reduced;
-    }
-
-    private boolean allShareCommonPrefix(List<List<String>> values) {
-        if (values.size() <= 1) {
-            return false;
-        }
-        String prefix = null;
-        for (List<String> parts : values) {
-            if (parts.size() <= 1) {
-                return false;
-            }
-            String current = parts.get(0);
-            if (prefix == null) {
-                prefix = current;
-                continue;
-            }
-            if (!prefix.equalsIgnoreCase(current)) {
-                return false;
-            }
-        }
-        return prefix != null;
-    }
-
-    private boolean allShareCommonSuffix(List<List<String>> values) {
-        if (values.size() <= 1) {
-            return false;
-        }
-        String suffix = null;
-        for (List<String> parts : values) {
-            if (parts.size() <= 1) {
-                return false;
-            }
-            String current = parts.get(parts.size() - 1);
-            if (suffix == null) {
-                suffix = current;
-                continue;
-            }
-            if (!suffix.equalsIgnoreCase(current)) {
-                return false;
-            }
-        }
-        return suffix != null;
-    }
-
-    private void addVariantToken(List<String> variants, String rawVariant) {
-        if (rawVariant == null || rawVariant.isBlank()) {
-            return;
-        }
-
-        String normalized = rawVariant.trim().replaceAll("\\s+", "_").toLowerCase(Locale.ROOT);
-        if (!normalized.isEmpty() && variants.stream().noneMatch(normalized::equalsIgnoreCase)) {
-            variants.add(normalized);
-        }
-    }
-
-    private String buildPackageKey(String pluginKey, List<String> variants) {
-        if (variants == null || variants.isEmpty()) {
-            return pluginKey;
-        }
-        return pluginKey + "@" + String.join("+", variants);
-    }
-
-    private String descriptorKey(BundlePackageMatch match) {
-        return match.pluginKey().toLowerCase(Locale.ROOT) + "|" + match.rootPath().toLowerCase(Locale.ROOT);
+        return archiveInspector.discoverPackageDescriptors(archive);
     }
 
     private String trimPackageRoot(String entryPath, String packageRootPath) throws BundleException {
@@ -1892,82 +1573,30 @@ public final class BundleService {
     }
 
     private BundlePreference loadPreference(String bundleId, String sourceZipName) {
-        File file = getPreferenceFile(bundleId);
-        if (!file.exists()) {
-            return new BundlePreference(bundleId, sourceZipName, false, List.of(), null, Map.of());
-        }
-
-        YamlConfiguration configuration = YamlConfiguration.loadConfiguration(file);
-        LinkedHashMap<String, String> selectedPackages = new LinkedHashMap<>();
-        ConfigurationSection selectionSection = configuration.getConfigurationSection("selectedPackages");
-        if (selectionSection != null) {
-            for (String key : selectionSection.getKeys(false)) {
-                String selectedPackage = selectionSection.getString(key);
-                if (selectedPackage != null && !selectedPackage.isBlank()) {
-                    selectedPackages.put(key.toLowerCase(Locale.ROOT), selectedPackage);
-                }
-            }
-        }
-        return new BundlePreference(
-                configuration.getString("bundleId", bundleId),
-                configuration.getString("sourceZipName", sourceZipName),
-                configuration.getBoolean("bundleDisabled", false),
-                configuration.getStringList("disabledPackages"),
-                configuration.getString("selectedBundleVariant"),
-                selectedPackages
-        );
+        return stateStore.loadPreference(bundleId, sourceZipName);
     }
 
     private List<BundlePreference> loadAllPreferences() {
-        File[] files = preferenceDirectory.listFiles((dir, name) -> name.endsWith(".yml"));
-        if (files == null || files.length == 0) {
-            return List.of();
-        }
-
-        ArrayList<BundlePreference> preferences = new ArrayList<>(files.length);
-        for (File file : files) {
-            YamlConfiguration configuration = YamlConfiguration.loadConfiguration(file);
-            preferences.add(new BundlePreference(
-                    configuration.getString("bundleId", PathUtils.baseName(file.getName())),
-                    configuration.getString("sourceZipName", PathUtils.baseName(file.getName())),
-                    configuration.getBoolean("bundleDisabled", false),
-                    configuration.getStringList("disabledPackages"),
-                    configuration.getString("selectedBundleVariant"),
-                    readSelectedPackages(configuration)
-            ));
-        }
-        return preferences;
-    }
-
-    private Map<String, String> readSelectedPackages(YamlConfiguration configuration) {
-        LinkedHashMap<String, String> selectedPackages = new LinkedHashMap<>();
-        ConfigurationSection selectionSection = configuration.getConfigurationSection("selectedPackages");
-        if (selectionSection == null) {
-            return selectedPackages;
-        }
-
-        for (String key : selectionSection.getKeys(false)) {
-            String selectedPackage = selectionSection.getString(key);
-            if (selectedPackage != null && !selectedPackage.isBlank()) {
-                selectedPackages.put(key.toLowerCase(Locale.ROOT), selectedPackage);
-            }
-        }
-        return selectedPackages;
+        return stateStore.loadAllPreferences();
     }
 
     private void savePreference(BundlePreference preference) throws BundleException {
-        YamlConfiguration configuration = new YamlConfiguration();
-        configuration.set("bundleId", preference.getBundleId());
-        configuration.set("sourceZipName", preference.getSourceZipName());
-        configuration.set("bundleDisabled", preference.isBundleDisabled());
-        configuration.set("disabledPackages", new ArrayList<>(preference.getDisabledPackages()));
-        configuration.set("selectedBundleVariant", preference.getSelectedBundleVariant());
-        configuration.set("selectedPackages", new LinkedHashMap<>(preference.getSelectedPackages()));
-        try {
-            configuration.save(getPreferenceFile(preference.getBundleId()));
-        } catch (IOException ex) {
-            throw new BundleException("Failed to save bundle preference " + preference.getBundleId() + ".", ex);
-        }
+        stateStore.savePreference(preference);
+    }
+
+    private BundlePreference updateStoredBundleMetadata(
+            BundlePreference preference,
+            BundleArchiveDescriptor descriptor
+    ) {
+        return new BundlePreference(
+                preference.getBundleId(),
+                descriptor.sourceZipName(),
+                descriptor.sourceSha1(),
+                preference.isBundleDisabled(),
+                preference.getDisabledPackages(),
+                preference.getSelectedBundleVariant(),
+                preference.getSelectedPackages()
+        );
     }
 
     private boolean hasPackageFailure(String bundleId, String packageKey) {
@@ -2004,10 +1633,6 @@ public final class BundleService {
         pendingVariantMessages = List.of();
     }
 
-    private File getPreferenceFile(String bundleId) {
-        return new File(preferenceDirectory, bundleId + ".yml");
-    }
-
     private <T> List<T> deduplicatePackages(List<T> values) {
         return new ArrayList<>(new LinkedHashSet<>(values));
     }
@@ -2021,11 +1646,19 @@ public final class BundleService {
         return false;
     }
 
+    private int parseBundleOrder(String bundleId) {
+        try {
+            return Integer.parseInt(bundleId);
+        } catch (NumberFormatException ignored) {
+            return Integer.MAX_VALUE;
+        }
+    }
+
     private boolean matchesBundleQuery(BundleRecord record, String normalizedQuery) {
         String sourceZipName = record.getSourceZipName().toLowerCase(Locale.ROOT);
         String sourceBaseName = baseName(record.getSourceZipName()).toLowerCase(Locale.ROOT);
-        return record.getBundleId().toLowerCase(Locale.ROOT).startsWith(normalizedQuery)
-                || record.getBundleShortId().toLowerCase(Locale.ROOT).startsWith(normalizedQuery)
+        return record.getBundleId().equalsIgnoreCase(normalizedQuery)
+                || record.getBundleShortId().equalsIgnoreCase(normalizedQuery)
                 || sourceZipName.equals(normalizedQuery)
                 || sourceBaseName.equals(normalizedQuery);
     }
@@ -2058,88 +1691,6 @@ public final class BundleService {
         throw new BundleException("Bundle file not found: " + archiveFileName);
     }
 
-    private void saveRecord(BundleRecord record) throws BundleException {
-        YamlConfiguration config = new YamlConfiguration();
-        config.set("id", record.getId());
-        config.set("bundleId", record.getBundleId());
-        config.set("packageKey", record.getPackageKey());
-        config.set("sourceZipName", record.getSourceZipName());
-        config.set("installedAtEpochMillis", record.getInstalledAtEpochMillis());
-        config.set("warnings", new ArrayList<>(record.getWarnings()));
-        config.set("createdDirectories", new ArrayList<>(record.getCreatedDirectories()));
-
-        List<Map<String, Object>> fileMaps = new ArrayList<>();
-        for (BundleRecord.InstalledFile installedFile : record.getInstalledFiles()) {
-            LinkedHashMap<String, Object> values = new LinkedHashMap<>();
-            values.put("sourceEntry", installedFile.getSourceEntry());
-            values.put("pluginKey", installedFile.getPluginKey());
-            values.put("targetPath", installedFile.getTargetPath());
-            values.put("backupPath", installedFile.getBackupPath());
-            fileMaps.add(values);
-        }
-        config.set("installedFiles", fileMaps);
-
-        List<Map<String, Object>> mutationMaps = new ArrayList<>();
-        for (BundleRecord.ConfigMutation mutation : record.getConfigMutations()) {
-            LinkedHashMap<String, Object> values = new LinkedHashMap<>();
-            values.put("type", mutation.getType());
-            values.put("configPath", mutation.getConfigPath());
-            values.put("targetPath", mutation.getTargetPath());
-            values.put("value", mutation.getValue());
-            mutationMaps.add(values);
-        }
-        config.set("configMutations", mutationMaps);
-
-        try {
-            config.save(getRecordFile(record.getId()));
-        } catch (IOException ex) {
-            throw new BundleException("Failed to save package record " + record.getId() + ".", ex);
-        }
-    }
-
-    private BundleRecord loadRecord(File file) throws BundleException {
-        YamlConfiguration config = YamlConfiguration.loadConfiguration(file);
-        String id = requireString(config, "id", file);
-        String bundleId = requireString(config, "bundleId", file);
-        String packageKey = requireString(config, "packageKey", file);
-        String sourceZipName = requireString(config, "sourceZipName", file);
-        long installedAt = config.getLong("installedAtEpochMillis");
-
-        List<String> warnings = config.getStringList("warnings");
-        List<String> createdDirectories = config.getStringList("createdDirectories");
-        List<BundleRecord.InstalledFile> installedFiles = new ArrayList<>();
-        for (Map<?, ?> raw : config.getMapList("installedFiles")) {
-            installedFiles.add(new BundleRecord.InstalledFile(
-                    stringValue(raw.get("sourceEntry")),
-                    stringValue(raw.get("pluginKey")),
-                    stringValue(raw.get("targetPath")),
-                    stringValue(raw.get("backupPath"))
-            ));
-        }
-
-        List<BundleRecord.ConfigMutation> configMutations = new ArrayList<>();
-        for (Map<?, ?> raw : config.getMapList("configMutations")) {
-            configMutations.add(new BundleRecord.ConfigMutation(
-                    stringValue(raw.get("type")),
-                    stringValue(raw.get("configPath")),
-                    stringValue(raw.get("targetPath")),
-                    stringValue(raw.get("value"))
-            ));
-        }
-
-        return new BundleRecord(
-                id,
-                bundleId,
-                packageKey,
-                sourceZipName,
-                installedAt,
-                warnings,
-                installedFiles,
-                configMutations,
-                createdDirectories
-        );
-    }
-
     private List<BundleRecord.ConfigMutation> applyConfigMutations(
             List<BundleRecord.ConfigMutation> mutations,
             List<String> warnings
@@ -2156,6 +1707,41 @@ public final class BundleService {
             }
         }
         return applied;
+    }
+
+    private void validateConfigMutationPlan(
+            String packageKey,
+            List<BundleRecord.ConfigMutation> mutations
+    ) throws BundleException {
+        LinkedHashMap<String, String> registeredSections = new LinkedHashMap<>();
+        for (BundleRecord.ConfigMutation mutation : mutations) {
+            if (mutation.getConfigPath() == null || mutation.getConfigPath().isBlank()) {
+                throw new BundleException("Package '" + packageKey + "' contains a config mutation with empty config path.");
+            }
+            if (mutation.getTargetPath() == null || mutation.getTargetPath().isBlank()) {
+                throw new BundleException("Package '" + packageKey + "' contains a config mutation with empty target path.");
+            }
+            if (mutation.getValue() == null || mutation.getValue().isBlank()) {
+                throw new BundleException("Package '" + packageKey + "' contains a config mutation with empty value.");
+            }
+
+            switch (mutation.getType()) {
+                case APPEND_STRING_LIST -> PathUtils.normalizeRelativePath(mutation.getConfigPath());
+                case REGISTER_SECTION_FILE -> {
+                    PathUtils.normalizeRelativePath(mutation.getConfigPath());
+                    String uniqueTarget = mutation.getConfigPath().toLowerCase(Locale.ROOT)
+                            + "|" + mutation.getTargetPath().toLowerCase(Locale.ROOT);
+                    String previousValue = registeredSections.putIfAbsent(uniqueTarget, mutation.getValue());
+                    if (previousValue != null && !previousValue.equalsIgnoreCase(mutation.getValue())) {
+                        throw new BundleException(
+                                "Package '" + packageKey + "' tries to register multiple files into the same config node: "
+                                        + mutation.getTargetPath()
+                        );
+                    }
+                }
+                default -> throw new BundleException("Unsupported config mutation type: " + mutation.getType());
+            }
+        }
     }
 
     private ConfigMutationResult applyConfigMutation(BundleRecord.ConfigMutation mutation) throws BundleException {
@@ -2331,7 +1917,7 @@ public final class BundleService {
 
     private void cleanupTransientArtifacts(String recordId) {
         // Ban ghi duoc luu rieng, backup chi la du lieu tam de rollback/uninstall.
-        deleteIfExists(getRecordFile(recordId).toPath());
+        deleteIfExists(stateStore.getRecordFile(recordId).toPath());
         deleteRecursively(backupDirectory.toPath().resolve(recordId));
     }
 
@@ -2378,10 +1964,6 @@ public final class BundleService {
     private boolean isSupportedArchiveName(String fileName) {
         String lowerName = fileName.toLowerCase(Locale.ROOT);
         return lowerName.endsWith(".zip");
-    }
-
-    private File getRecordFile(String recordId) {
-        return new File(packageDirectory, recordId + ".yml");
     }
 
     private Path resolveServerPath(String relativePath) {
@@ -2470,62 +2052,24 @@ public final class BundleService {
         }
     }
 
-    private String computeBundleId(File source) throws BundleException {
-        return allocateBundleId(source.getName());
-    }
-
-    private String allocateBundleId(String sourceName) throws BundleException {
-        YamlConfiguration index = YamlConfiguration.loadConfiguration(bundleIndexFile);
-        String sourceKey = normalizedSourceKey(sourceName);
-
-        String existingId = index.getString("entries." + sourceKey);
-        if (existingId != null && !existingId.isBlank()) {
-            return existingId;
-        }
-
-        String migratedId = findExistingBundleIdForSource(sourceName);
-        if (migratedId != null && !migratedId.isBlank()) {
-            index.set("entries." + sourceKey, migratedId);
-            saveBundleIndex(index);
-            return migratedId;
-        }
-
-        int nextId = Math.max(1, index.getInt("nextId", 1));
-        String bundleId = String.valueOf(nextId);
-        index.set("entries." + sourceKey, bundleId);
-        index.set("nextId", nextId + 1);
-        saveBundleIndex(index);
-        return bundleId;
-    }
-
-    private void saveBundleIndex(YamlConfiguration index) throws BundleException {
-        try {
-            index.save(bundleIndexFile);
-        } catch (IOException ex) {
-            throw new BundleException("Failed to save bundle index.", ex);
-        }
-    }
-
-    private String findExistingBundleIdForSource(String sourceName) {
-        for (BundleRecord record : listInstalledPackageRecords()) {
-            if (record.getSourceZipName().equalsIgnoreCase(sourceName)) {
-                return record.getBundleId();
-            }
-        }
-        for (BundlePreference preference : loadAllPreferences()) {
-            if (preference.getSourceZipName().equalsIgnoreCase(sourceName)) {
-                return preference.getBundleId();
-            }
-        }
-        return null;
-    }
-
-    private String normalizedSourceKey(String sourceName) {
-        return sourceName.trim().toLowerCase(Locale.ROOT).replace('.', '_');
-    }
-
     private String shortId(String value) {
         return value;
+    }
+
+    private Path deriveServerRoot(File dataFolder) {
+        File absoluteDataFolder = dataFolder.getAbsoluteFile();
+        File current = absoluteDataFolder;
+        while (current != null) {
+            if ("plugins".equalsIgnoreCase(current.getName())) {
+                File parent = current.getParentFile();
+                if (parent != null) {
+                    return parent.toPath().toAbsolutePath().normalize();
+                }
+                break;
+            }
+            current = current.getParentFile();
+        }
+        return absoluteDataFolder.toPath().toAbsolutePath().normalize();
     }
 
     private String recordId(String bundleId, String packageKey) {
@@ -2540,31 +2084,6 @@ public final class BundleService {
 
         String variantKey = packageKey.substring(variantSeparator + 1).replace('+', '_');
         return bundleIdShort + "_" + variantKey;
-    }
-
-    private String requireString(YamlConfiguration config, String path, File sourceFile) throws BundleException {
-        String value = config.getString(path);
-        if (value == null || value.isBlank()) {
-            throw new BundleException("Missing '" + path + "' in record " + sourceFile.getName() + ".");
-        }
-        return value;
-    }
-
-    private String stringValue(Object value) {
-        return value == null ? "" : String.valueOf(value);
-    }
-
-    private static final class BundleVariantAggregate {
-        private final String displayName;
-        private final LinkedHashMap<String, String> selections;
-
-        private BundleVariantAggregate(String displayName) {
-            this.displayName = displayName;
-            this.selections = new LinkedHashMap<>();
-        }
-    }
-
-    private record ConfigMutationResult(boolean applied, String warning) {
     }
 
     private List<String> splitTargetPaths(String rawTargetPath) {
@@ -2582,98 +2101,56 @@ public final class BundleService {
         return PathUtils.baseName(fileName);
     }
 
-    private record BundleArchiveDescriptor(
-            String bundleId,
-            String sourceZipName,
-            List<String> installablePackages,
-            List<String> allPackages,
-            List<BundleVariantGroup> variantGroups,
-            List<VariantChoiceGroup> variantChoiceGroups
-    ) {
+    private String computeSourceSha1(File source) throws BundleException {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-1");
+            if (source.isDirectory()) {
+                updateDirectoryDigest(digest, source.toPath(), source.toPath());
+            } else {
+                try (InputStream inputStream = Files.newInputStream(source.toPath())) {
+                    updateDigest(digest, inputStream);
+                }
+            }
+            return toHex(digest.digest());
+        } catch (IOException | NoSuchAlgorithmException ex) {
+            throw new BundleException("Failed to compute SHA-1 for bundle source " + source.getName() + ".", ex);
+        }
     }
 
-    private record ArchivePackageInfo(
-            List<String> installablePackages,
-            List<String> allPackages,
-            List<BundleVariantGroup> variantGroups,
-            List<VariantChoiceGroup> variantChoiceGroups
-    ) {
+    private void updateDirectoryDigest(
+            MessageDigest digest,
+            Path root,
+            Path current
+    ) throws IOException {
+        try (var paths = Files.walk(current)) {
+            for (Path path : paths.filter(Files::isRegularFile).sorted().toList()) {
+                String relativePath = root.relativize(path).toString().replace('\\', '/');
+                digest.update(relativePath.getBytes(StandardCharsets.UTF_8));
+                digest.update((byte) 0);
+                try (InputStream inputStream = Files.newInputStream(path)) {
+                    updateDigest(digest, inputStream);
+                }
+                digest.update((byte) 0);
+            }
+        }
     }
 
-    private record BundlePackageDescriptor(
-            String packageKey,
-            String pluginKey,
-            String rootPath,
-            boolean supported,
-            List<BundleArchiveEntry> entries,
-            List<String> rawVariantParts,
-            List<String> normalizedVariantParts
-    ) {
+    private void updateDigest(MessageDigest digest, InputStream inputStream) throws IOException {
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = inputStream.read(buffer)) >= 0) {
+            if (read > 0) {
+                digest.update(buffer, 0, read);
+            }
+        }
     }
 
-    private record BundlePackageMatch(
-            String pluginKey,
-            String rootPath,
-            boolean supported,
-            List<String> rawVariantParts,
-            List<String> normalizedVariantParts
-    ) {
+    private String toHex(byte[] bytes) {
+        StringBuilder builder = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) {
+            builder.append(String.format("%02x", value));
+        }
+        return builder.toString();
     }
 
-    private record PluginFolderInfo(
-            String pluginName,
-            String variantName
-    ) {
-    }
-
-    private record BundleVariantGroup(
-            String pluginKey,
-            List<BundleVariantOption> options
-    ) {
-    }
-
-    private record BundleVariantOption(
-            String packageKey,
-            String displayName
-    ) {
-    }
-
-    private record VariantPromptOption(
-            int index,
-            String bundleId,
-            String sourceZipName,
-            String title,
-            String displayName
-            ,
-            Map<String, String> selections
-    ) {
-    }
-
-    private record VariantChoiceGroup(
-            String title,
-            List<VariantChoiceOption> options
-    ) {
-    }
-
-    private record VariantChoiceOption(
-            String displayName,
-            Map<String, String> selections
-    ) {
-    }
-
-    private record VariantSelectionDecision(
-            BundlePreference preference,
-            List<String> targetPackages,
-            List<String> messages
-    ) {
-    }
-
-    private record KnownBundle(
-            String bundleId,
-            String sourceZipName,
-            BundleArchiveDescriptor archiveDescriptor,
-            List<String> installablePackages,
-            List<String> allKnownPackages
-    ) {
-    }
 }

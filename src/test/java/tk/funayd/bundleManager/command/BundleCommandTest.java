@@ -5,6 +5,7 @@ import org.bukkit.command.CommandSender;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import tk.funayd.bundleManager.bundle.BundleActionReport;
+import tk.funayd.bundleManager.bundle.BundleLoadReport;
 import tk.funayd.bundleManager.bundle.BundleOverallState;
 import tk.funayd.bundleManager.bundle.BundlePackageState;
 import tk.funayd.bundleManager.bundle.BundlePackageView;
@@ -108,6 +109,12 @@ class BundleCommandTest {
     @Test
     void shouldReloadBundles() {
         BundleService bundleService = mock(BundleService.class);
+        when(bundleService.autoLoadBundles()).thenReturn(new BundleLoadReport(
+                4,
+                2,
+                List.of("warning one"),
+                List.of("error one")
+        ));
         when(bundleService.hasIgnoredIncomingFiles()).thenReturn(true);
         BundleCommand command = new BundleCommand(bundleService);
         CommandSender sender = allowedSender();
@@ -117,8 +124,13 @@ class BundleCommandTest {
         verify(bundleService).autoLoadBundles();
         ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
         verify(sender, atLeastOnce()).sendMessage(messageCaptor.capture());
-        assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("Reloaded bundles")));
+        assertTrue(messageCaptor.getAllValues().stream().anyMatch(message ->
+                message.contains("Installed")
+                        && message.contains("package from")
+                        && message.contains("bundle")));
         assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("Ignored non-zip files")));
+        assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("warning one")));
+        assertTrue(messageCaptor.getAllValues().stream().anyMatch(message -> message.contains("error one")));
         assertTrue(messageCaptor.getAllValues().stream().noneMatch(message -> message.contains("Multiple variant detected")));
     }
 

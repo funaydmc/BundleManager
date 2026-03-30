@@ -11,6 +11,7 @@ public interface SupportedPluginInstaller {
 
     String getPluginKey();
 
+    // Installer chi duoc map file bundle sang file moi se duoc tao them.
     Optional<ResolvedBundleFile> resolveFile(String relativePath, String bundleIdShort) throws BundleException;
 
     default boolean shouldRewriteFileContent(ResolvedBundleFile bundleFile) {
@@ -36,5 +37,6 @@ public interface SupportedPluginInstaller {
         return List.of();
     }
 
+    // Mutation chi duoc phep theo huong cong them va phai rollback duoc.
     List<BundleRecord.ConfigMutation> buildConfigMutations(List<ResolvedBundleFile> installedFiles, String bundleIdShort);
 }

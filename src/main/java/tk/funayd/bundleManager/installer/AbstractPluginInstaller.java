@@ -70,7 +70,7 @@ public abstract class AbstractPluginInstaller implements SupportedPluginInstalle
             String targetPath,
             String value
     ) {
-        // Dung cho config can append vao string list.
+        // Chi append gia tri moi, khong thay the danh sach co san.
         return new BundleRecord.ConfigMutation("APPEND_STRING_LIST", configPath, targetPath, value);
     }
 
@@ -79,7 +79,7 @@ public abstract class AbstractPluginInstaller implements SupportedPluginInstalle
             String targetPath,
             String fileName
     ) {
-        // Dung cho config dang ky file vao mot section.
+        // Chi tao node dang ky moi neu path nay chua co.
         return new BundleRecord.ConfigMutation("REGISTER_SECTION_FILE", configPath, targetPath, fileName);
     }
 
